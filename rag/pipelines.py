@@ -5,27 +5,18 @@ Two modes:
   1. Focused — ticker-specific, hybrid retrieval (stock profiles + SEC filings)
   2. Global — cross-universe, searches all chunks with diversity
 
-Hybrid retrieval (focused mode):
-  - Always retrieves the 2 stock profile chunks for the ticker
-  - Plus top 6 SEC filing chunks by vector similarity
-  - LLM always has both scores/metrics AND filing content
-
-Components:
-  - SentenceTransformersTextEmbedder (local, bge-small-en-v1.5)
-  - PgvectorEmbeddingRetriever (from Haystack pgvector integration)
-  - PromptBuilder (constructs the LLM prompt with context)
-  - OpenRouter LLM via OpenAI-compatible API (Mistral Medium 3.1)
+Embeddings: HuggingFace Inference API (router.huggingface.co) for fast query-time embedding.
+LLM: OpenRouter API (Mistral Medium 3.1)
 
 Usage:
   from rag.pipelines import query_focused, query_global
-
-  result = query_focused("What are key risks?", ticker="KRO", history=[])
-  result = query_global("Which stocks have leadership changes?", history=[])
 """
 
 import os
 import sys
 import pathlib
+import requests
+import numpy as np
 from typing import List, Dict, Optional
 from collections import defaultdict
 
@@ -37,13 +28,16 @@ load_dotenv(_root / ".env.local")
 
 # --- Config ---
 EMBED_MODEL = "BAAI/bge-small-en-v1.5"
+HF_API_TOKEN = os.getenv("HF_API_TOKEN", "")
+HF_EMBED_URL = f"https://router.huggingface.co/hf-inference/models/{EMBED_MODEL}"
+
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "mistralai/mistral-medium-3.1")
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
 # Retrieval settings
-FOCUSED_SEC_TOP_K = 6       # SEC filing chunks per focused query
-FOCUSED_PROFILE_TOP_K = 2   # Stock profile chunks (always included)
+FOCUSED_SEC_TOP_K = 6
+FOCUSED_PROFILE_TOP_K = 2
 GLOBAL_TOP_K = 15
 
 
@@ -93,6 +87,40 @@ Answer:"""
 
 
 # ======================================================================
+# HF ROUTER API EMBEDDER (replaces local SentenceTransformers)
+# ======================================================================
+
+def embed_query(text: str) -> List[float]:
+    """Embed a single query using HuggingFace Inference API (router endpoint).
+    Returns a 384-dimensional normalized vector.
+    ~0.5-1s per query vs ~24s with local model on Railway's CPU.
+    """
+    headers = {"Content-Type": "application/json"}
+    if HF_API_TOKEN:
+        headers["Authorization"] = f"Bearer {HF_API_TOKEN}"
+
+    response = requests.post(
+        HF_EMBED_URL,
+        headers=headers,
+        json={"inputs": text},
+        timeout=30,
+    )
+    response.raise_for_status()
+
+    result = response.json()
+    # API returns [[...]] for single input or [...] directly
+    vec = result[0] if isinstance(result[0], list) else result
+
+    # Normalize (bge models perform best with normalized vectors)
+    vec = np.array(vec, dtype=np.float32)
+    norm = np.linalg.norm(vec)
+    if norm > 0:
+        vec = vec / norm
+
+    return vec.tolist()
+
+
+# ======================================================================
 # COMPONENT INITIALIZATION (lazy, singleton)
 # ======================================================================
 
@@ -100,11 +128,10 @@ _components = {}
 
 
 def _init_components():
-    """Initialize all components once and cache them."""
+    """Initialize retriever, prompt builder, and LLM components once."""
     if _components:
         return
 
-    from haystack.components.embedders import SentenceTransformersTextEmbedder
     from haystack.components.builders import PromptBuilder
     from haystack.components.generators.openai import OpenAIGenerator
     from haystack.utils import Secret
@@ -113,17 +140,13 @@ def _init_components():
 
     store = get_document_store()
 
-    # Embedder (local, shared by both modes)
-    embedder = SentenceTransformersTextEmbedder(model=EMBED_MODEL)
-    embedder.warm_up()
-
-    # SEC filing retriever (for focused mode — only SEC filings)
+    # SEC filing retriever (for focused mode)
     sec_retriever = PgvectorEmbeddingRetriever(
         document_store=store,
         top_k=FOCUSED_SEC_TOP_K,
     )
 
-    # Profile retriever (for focused mode — only stock profiles)
+    # Profile retriever (for focused mode)
     profile_retriever = PgvectorEmbeddingRetriever(
         document_store=store,
         top_k=FOCUSED_PROFILE_TOP_K,
@@ -138,15 +161,14 @@ def _init_components():
     # Prompt builder
     prompt_builder = PromptBuilder(template=PROMPT_TEMPLATE)
 
-    # LLM via OpenRouter (OpenAI-compatible)
+    # LLM via OpenRouter
     llm = OpenAIGenerator(
         api_key=Secret.from_token(OPENROUTER_API_KEY),
         model=OPENROUTER_MODEL,
         api_base_url=OPENROUTER_BASE_URL,
-        generation_kwargs={"max_tokens": 1000},
+        generation_kwargs={"max_tokens": 600},
     )
 
-    _components["embedder"] = embedder
     _components["sec_retriever"] = sec_retriever
     _components["profile_retriever"] = profile_retriever
     _components["global_retriever"] = global_retriever
@@ -159,10 +181,7 @@ def _init_components():
 # ======================================================================
 
 def diversify_results(documents, max_per_ticker=2, max_total=10):
-    """
-    Ensure global results span multiple tickers.
-    Takes top max_per_ticker docs per ticker, up to max_total.
-    """
+    """Ensure global results span multiple tickers."""
     ticker_docs = defaultdict(list)
     for doc in documents:
         ticker = doc.meta.get("ticker", "unknown")
@@ -197,20 +216,11 @@ def query_focused(
     Always includes:
       - 2 stock profile chunks (company overview + coverage analysis)
       - Top 6 SEC filing chunks by similarity
-
-    Args:
-        query: The user's question
-        ticker: Stock ticker to filter on (e.g. "KRO")
-        history: List of {"role": "user"/"assistant", "content": "..."} dicts
-
-    Returns:
-        dict with "reply" (str) and "documents" (list of retrieved docs)
     """
     _init_components()
 
-    # Step 1: Embed the query
-    embed_result = _components["embedder"].run(text=query)
-    query_embedding = embed_result["embedding"]
+    # Step 1: Embed the query via HF API
+    query_embedding = embed_query(query)
 
     # Step 2a: Retrieve stock profile chunks for this ticker
     profile_filters = {
@@ -240,7 +250,7 @@ def query_focused(
     )
     sec_docs = sec_result["documents"]
 
-    # Step 2c: Combine — profiles first (always present), then SEC filings
+    # Step 2c: Combine — profiles first, then SEC filings
     documents = profile_docs + sec_docs
 
     # Step 3: Build prompt
@@ -264,19 +274,11 @@ def query_global(
 ) -> dict:
     """
     Run a cross-universe RAG query (no ticker filter).
-
-    Args:
-        query: The user's question
-        history: List of {"role": "user"/"assistant", "content": "..."} dicts
-
-    Returns:
-        dict with "reply" (str) and "documents" (list of retrieved docs)
     """
     _init_components()
 
-    # Step 1: Embed the query
-    embed_result = _components["embedder"].run(text=query)
-    query_embedding = embed_result["embedding"]
+    # Step 1: Embed the query via HF API
+    query_embedding = embed_query(query)
 
     # Step 2: Retrieve (no ticker filter)
     retriever_result = _components["global_retriever"].run(
