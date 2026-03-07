@@ -24,7 +24,9 @@ from typing import List, Optional
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+import json
 
 # Path setup
 _root = pathlib.Path(__file__).resolve().parent.parent
@@ -32,7 +34,7 @@ sys.path.insert(0, str(_root))
 load_dotenv(_root / ".env.local")
 
 # Import pipelines (lazy loaded on first request)
-from rag.pipelines import query_focused, query_global
+from rag.pipelines import query_focused, query_global, query_focused_stream, query_global_stream
 
 
 # ======================================================================
@@ -137,6 +139,66 @@ async def chat(request: ChatRequest):
             mode=mode,
             ticker=request.ticker.upper() if request.ticker else None,
             sources=sources,
+        )
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/chat/stream")
+async def chat_stream(request: ChatRequest):
+    """
+    Streaming chat endpoint.
+    
+    - If `ticker` is provided → focused mode (ticker-specific)
+    - If `ticker` is null/empty → global mode (cross-universe)
+    """
+    try:
+        # Convert history to list of dicts
+        history = [{"role": msg.role, "content": msg.content} for msg in request.history]
+
+        if request.ticker:
+            # Focused mode
+            result = query_focused_stream(
+                query=request.message,
+                ticker=request.ticker.upper(),
+                history=history,
+            )
+        else:
+            # Global mode
+            result = query_global_stream(
+                query=request.message,
+                history=history,
+            )
+
+        # Build source documents for the response
+        sources = []
+        for doc in result["documents"]:
+            sources.append({
+                "ticker": doc.meta.get("ticker", "?"),
+                "source_type": doc.meta.get("source_type", "?"),
+                "form_type": doc.meta.get("form_type"),
+                "section": doc.meta.get("section"),
+                "snippet": doc.content[:200].replace("\n", " "),
+            })
+
+        async def event_generator():
+            try:
+                # Stream LLM tokens
+                for token in result["stream"]:
+                    yield f"data: {json.dumps({'token': token})}\n\n"
+                # Send sources at the end
+                yield f"data: {json.dumps({'sources': sources})}\n\n"
+                yield "data: [DONE]\n\n"
+            except Exception as e:
+                yield f"data: {json.dumps({'error': str(e)})}\n\n"
+
+        return StreamingResponse(
+            event_generator(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no"
+            }
         )
 
     except Exception as e:

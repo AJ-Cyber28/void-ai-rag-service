@@ -17,6 +17,7 @@ import sys
 import pathlib
 import requests
 import numpy as np
+import time
 from typing import List, Dict, Optional
 from collections import defaultdict
 
@@ -302,3 +303,128 @@ def query_global(
 
     reply = llm_result["replies"][0] if llm_result["replies"] else ""
     return {"reply": reply, "documents": documents}
+
+
+def query_focused_stream(
+    query: str,
+    ticker: str,
+    history: Optional[List[Dict[str, str]]] = None,
+):
+    """
+    Run a ticker-specific RAG query with hybrid retrieval, returning a token generator.
+    """
+    _init_components()
+
+    # Step 1: Embed the query via HF API
+    query_embedding = embed_query(query)
+
+    # Step 2a: Retrieve stock profile chunks for this ticker
+    profile_filters = {
+        "operator": "AND",
+        "conditions": [
+            {"field": "meta.ticker", "operator": "==", "value": ticker},
+            {"field": "meta.source_type", "operator": "==", "value": "stock_profile"},
+        ]
+    }
+    profile_result = _components["profile_retriever"].run(
+        query_embedding=query_embedding,
+        filters=profile_filters,
+    )
+    profile_docs = profile_result["documents"]
+
+    # Step 2b: Retrieve SEC filing chunks for this ticker
+    sec_filters = {
+        "operator": "AND",
+        "conditions": [
+            {"field": "meta.ticker", "operator": "==", "value": ticker},
+            {"field": "meta.source_type", "operator": "==", "value": "sec_filing"},
+        ]
+    }
+    sec_result = _components["sec_retriever"].run(
+        query_embedding=query_embedding,
+        filters=sec_filters,
+    )
+    sec_docs = sec_result["documents"]
+
+    # Step 2c: Combine — profiles first, then SEC filings
+    documents = profile_docs + sec_docs
+
+    # Step 3: Build prompt
+    prompt_result = _components["prompt_builder"].run(
+        query=query,
+        system_prompt=SYSTEM_PROMPT,
+        history=history or [],
+        documents=documents,
+    )
+
+    # Step 4: Stream LLM response
+    from openai import OpenAI
+    client = OpenAI(api_key=OPENROUTER_API_KEY, base_url=OPENROUTER_BASE_URL)
+    
+    stream = client.chat.completions.create(
+        model=OPENROUTER_MODEL,
+        messages=[{"role": "user", "content": prompt_result["prompt"]}],
+        max_tokens=600,
+        stream=True,
+    )
+
+    def token_generator():
+        for chunk in stream:
+            if chunk.choices and len(chunk.choices) > 0:
+                content = chunk.choices[0].delta.content
+                if content:
+                    time.sleep(0.02)  # Slight artificial delay to make streaming look more natural
+                    yield content
+
+    return {"stream": token_generator(), "documents": documents}
+
+
+def query_global_stream(
+    query: str,
+    history: Optional[List[Dict[str, str]]] = None,
+):
+    """
+    Run a cross-universe RAG query returning a token generator.
+    """
+    _init_components()
+
+    # Step 1: Embed the query via HF API
+    query_embedding = embed_query(query)
+
+    # Step 2: Retrieve (no ticker filter)
+    retriever_result = _components["global_retriever"].run(
+        query_embedding=query_embedding,
+    )
+    raw_docs = retriever_result["documents"]
+
+    # Step 3: Diversify results
+    documents = diversify_results(raw_docs)
+
+    # Step 4: Build prompt
+    prompt_result = _components["prompt_builder"].run(
+        query=query,
+        system_prompt=SYSTEM_PROMPT,
+        history=history or [],
+        documents=documents,
+    )
+
+    # Step 5: Stream LLM response
+    from openai import OpenAI
+    client = OpenAI(api_key=OPENROUTER_API_KEY, base_url=OPENROUTER_BASE_URL)
+
+    stream = client.chat.completions.create(
+        model=OPENROUTER_MODEL,
+        messages=[{"role": "user", "content": prompt_result["prompt"]}],
+        max_tokens=600,
+        stream=True,
+    )
+
+    def token_generator():
+        for chunk in stream:
+            if chunk.choices and len(chunk.choices) > 0:
+                content = chunk.choices[0].delta.content
+                if content:
+                    time.sleep(0.02)  # Slight artificial delay to make streaming look more natural
+                    yield content
+
+    return {"stream": token_generator(), "documents": documents}
