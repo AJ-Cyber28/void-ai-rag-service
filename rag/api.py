@@ -1,16 +1,22 @@
 """
-Step 5: FastAPI RAG Service
+Void AI RAG + CrewAI Analysis Service
 
-Single endpoint that serves both focused (ticker-specific) and global queries.
-Called by the Next.js frontend from:
-  1. Explore & Chat page (focused or global mode)
-  2. Individual stock page Chat tab (always focused)
+Endpoints:
+  POST /chat          — RAG chat (focused or global mode)
+  POST /chat/stream   — RAG chat with SSE streaming
+  GET  /analysis/{ticker}  — Fetch cached AI analysis
+  POST /analyze/{ticker}   — Generate AI analysis via CrewAI agents
+  GET  /health        — Health check
+
+Called by the Next.js frontend (Vercel).
+Deployed on Railway.
 
 Usage:
   uvicorn rag.api:app --host 0.0.0.0 --port 8000 --reload
 
 Env (.env.local):
-  PG_CONN_STRING, OPENROUTER_API_KEY, OPENROUTER_MODEL
+  PG_CONN_STRING, OPENROUTER_API_KEY, OPENROUTER_MODEL,
+  SUPABASE_URL, SUPABASE_ANON_KEY, FINNHUB_API_KEY
 """
 
 import os
@@ -19,10 +25,11 @@ os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
 
 import sys
 import pathlib
+from datetime import datetime
 from typing import List, Optional
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -36,6 +43,15 @@ load_dotenv(_root / ".env.local")
 # Import pipelines (lazy loaded on first request)
 from rag.pipelines import query_focused, query_global, query_focused_stream, query_global_stream
 
+# Import CrewAI analysis module
+from rag.crew_analysis import (
+    gather_analysis_context,
+    run_analysis_crew,
+    get_cached_analysis,
+    upsert_analysis,
+    format_analysis_response,
+)
+
 
 # ======================================================================
 # APP SETUP
@@ -43,8 +59,8 @@ from rag.pipelines import query_focused, query_global, query_focused_stream, que
 
 app = FastAPI(
     title="Void AI RAG Service",
-    description="RAG-powered chat API for Void AI's Analyst Copilot",
-    version="1.0.0",
+    description="RAG-powered chat API + CrewAI analysis for Void AI's Analyst Copilot",
+    version="2.0.0",
 )
 
 # CORS — allow your Vercel frontend to call this
@@ -91,8 +107,41 @@ class ChatResponse(BaseModel):
     sources: List[SourceDocument]   # Retrieved docs metadata for UI
 
 
+# --- Analysis models ---
+
+class DebateStep(BaseModel):
+    agent: str
+    role: str
+    summary: str
+    fullOutput: str
+
+
+class NewsItem(BaseModel):
+    headline: str
+    summary: str = ""
+    source: str = ""
+    datetime: str = ""
+    url: str = ""
+
+
+class AnalysisResponse(BaseModel):
+    ticker: str
+    hypothesis: str
+    confidence: float
+    bullCase: dict
+    baseCase: dict
+    bearCase: dict
+    catalysts: list
+    risks: list
+    debateTranscript: list = []
+    newsContext: list = []
+    generatedAt: str = ""
+    modelUsed: str = ""
+    isStale: bool = False
+
+
 # ======================================================================
-# ENDPOINTS
+# CHAT ENDPOINTS (existing)
 # ======================================================================
 
 @app.post("/chat", response_model=ChatResponse)
@@ -205,6 +254,89 @@ async def chat_stream(request: ChatRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ======================================================================
+# CREWAI ANALYSIS ENDPOINTS (new)
+# ======================================================================
+
+@app.get("/analysis/{ticker}")
+async def get_analysis(ticker: str):
+    """
+    Retrieve cached AI analysis for a ticker.
+    Returns 404 if no analysis exists.
+    """
+    ticker = ticker.upper()
+
+    cached = get_cached_analysis(ticker)
+    if cached is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No analysis found for {ticker}. Use POST /analyze/{ticker} to generate."
+        )
+
+    return format_analysis_response(cached)
+
+
+@app.post("/analyze/{ticker}")
+async def analyze_stock(ticker: str, force: bool = Query(False)):
+    """
+    Generate AI analysis for a ticker using CrewAI agents.
+
+    - If fresh cache exists and force=False, returns cached version.
+    - Otherwise runs the full 5-agent crew (~15-30 seconds).
+
+    Query params:
+        force (bool): If true, bypass cache and regenerate.
+    """
+    ticker = ticker.upper()
+
+    # Check cache first (unless forced)
+    if not force:
+        cached = get_cached_analysis(ticker)
+        if cached and not cached.get("is_stale", False):
+            return format_analysis_response(cached)
+
+    # Gather all context data
+    try:
+        context = gather_analysis_context(ticker)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to gather data for {ticker}: {str(e)}"
+        )
+
+    # Run CrewAI analysis
+    try:
+        analysis = run_analysis_crew(context)
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Analysis generation failed for {ticker}: {str(e)}"
+        )
+
+    # Cache the result
+    gap_score = context.get("scores", {}).get("gap_score")
+    if gap_score is not None:
+        gap_score = float(gap_score)
+    upsert_analysis(ticker, analysis, gap_score)
+
+    # Format and return
+    response = format_analysis_response({
+        "ticker": ticker,
+        **analysis,
+        "generated_at": datetime.utcnow().isoformat(),
+        "model_used": os.getenv("OPENROUTER_MODEL", "mistralai/mistral-medium-3.1"),
+        "is_stale": False,
+    })
+
+    return response
+
+
+# ======================================================================
+# UTILITY ENDPOINTS
+# ======================================================================
+
 @app.get("/health")
 async def health():
     """Health check endpoint."""
@@ -215,10 +347,13 @@ async def health():
 async def root():
     """Root endpoint with API info."""
     return {
-        "service": "Void AI RAG Service",
-        "version": "1.0.0",
+        "service": "Void AI RAG + Analysis Service",
+        "version": "2.0.0",
         "endpoints": {
-            "POST /chat": "Main chat endpoint (focused or global mode)",
+            "POST /chat": "RAG chat endpoint (focused or global mode)",
+            "POST /chat/stream": "RAG chat with SSE streaming",
+            "GET /analysis/{ticker}": "Fetch cached AI analysis for a stock",
+            "POST /analyze/{ticker}": "Generate AI analysis using CrewAI agents (force=true to bypass cache)",
             "GET /health": "Health check",
         }
     }
