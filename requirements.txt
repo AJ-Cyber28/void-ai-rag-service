@@ -13,3 +13,4 @@ openai>=1.0.0
 crewai>=0.86.0
 crewai-tools>=0.17.0
 requests>=2.31.0
+litellm
