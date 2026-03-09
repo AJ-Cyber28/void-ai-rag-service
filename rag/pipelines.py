@@ -51,7 +51,7 @@ understand under-covered stocks using SEC filings, market data, and proprietary
 coverage gap scores.
 
 Rules:
-- Keep responses concise — aim for 3-5 short paragraphs maximum.
+- Keep responses concise — aim for 3-4 short paragraphs maximum.
 - Use bullet points sparingly, not for every detail.
 - Lead with the most important insight first.
 - When referencing data, briefly note the source (10-K, 10-Q, 8-K, or stock profile).
