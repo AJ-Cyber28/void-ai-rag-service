@@ -167,7 +167,6 @@ def _init_components():
         api_key=Secret.from_token(OPENROUTER_API_KEY),
         model=OPENROUTER_MODEL,
         api_base_url=OPENROUTER_BASE_URL,
-        generation_kwargs={"max_tokens": 600},
     )
 
     _components["sec_retriever"] = sec_retriever
@@ -364,7 +363,6 @@ def query_focused_stream(
     stream = client.chat.completions.create(
         model=OPENROUTER_MODEL,
         messages=[{"role": "user", "content": prompt_result["prompt"]}],
-        max_tokens=600,
         stream=True,
     )
 
@@ -414,7 +412,6 @@ def query_global_stream(
     stream = client.chat.completions.create(
         model=OPENROUTER_MODEL,
         messages=[{"role": "user", "content": prompt_result["prompt"]}],
-        max_tokens=600,
         stream=True,
     )
 
