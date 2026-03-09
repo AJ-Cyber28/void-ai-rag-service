@@ -231,10 +231,12 @@ async def chat_stream(request: ChatRequest):
             })
 
         async def event_generator():
+            import asyncio
             try:
                 # Stream LLM tokens
                 for token in result["stream"]:
                     yield f"data: {json.dumps({'token': token})}\n\n"
+                    await asyncio.sleep(0.02)
                 # Send sources at the end
                 yield f"data: {json.dumps({'sources': sources})}\n\n"
                 yield "data: [DONE]\n\n"

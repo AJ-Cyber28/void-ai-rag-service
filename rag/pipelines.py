@@ -373,7 +373,6 @@ def query_focused_stream(
             if chunk.choices and len(chunk.choices) > 0:
                 content = chunk.choices[0].delta.content
                 if content:
-                    time.sleep(0.02)  # Slight artificial delay to make streaming look more natural
                     yield content
 
     return {"stream": token_generator(), "documents": documents}
@@ -424,7 +423,6 @@ def query_global_stream(
             if chunk.choices and len(chunk.choices) > 0:
                 content = chunk.choices[0].delta.content
                 if content:
-                    time.sleep(0.02)  # Slight artificial delay to make streaming look more natural
                     yield content
 
     return {"stream": token_generator(), "documents": documents}
