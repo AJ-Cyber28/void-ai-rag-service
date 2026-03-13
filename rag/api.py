@@ -88,8 +88,9 @@ class ChatMessage(BaseModel):
 
 class ChatRequest(BaseModel):
     message: str
-    ticker: Optional[str] = None    # None = global mode, "COKE" = focused mode
-    history: List[ChatMessage] = []  # Previous messages in this session
+    ticker: Optional[str] = None         # None = global mode, "COKE" = focused mode
+    company_name: Optional[str] = None   # e.g. "S&P Global, Inc." — used for web search
+    history: List[ChatMessage] = []      # Previous messages in this session
 
 
 class SourceDocument(BaseModel):
@@ -162,6 +163,7 @@ async def chat(request: ChatRequest):
             result = query_focused(
                 query=request.message,
                 ticker=request.ticker.upper(),
+                company_name=request.company_name,
                 history=history,
             )
             mode = "focused"
@@ -220,6 +222,7 @@ async def chat_stream(request: ChatRequest):
             result = query_focused_stream(
                 query=request.message,
                 ticker=request.ticker.upper(),
+                company_name=request.company_name,
                 history=history,
             )
         else:

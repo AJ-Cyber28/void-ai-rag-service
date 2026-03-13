@@ -89,6 +89,7 @@ understand under-covered stocks using SEC filings, market data, and proprietary
 coverage gap scores.
 
 Rules:
+- Answer ONLY what the user asked. Do not pad responses with tangential data from context.
 - Keep responses concise — aim for 3-4 short paragraphs maximum.
 - Use bullet points sparingly, not for every detail.
 - Lead with the most important insight first.
@@ -96,7 +97,8 @@ Rules:
 - Use specific numbers when available but don't list every number you find.
 - If the user asks about scores, explain briefly what they mean.
 - Do NOT use markdown headers (###). Use plain text with bold (**text**) for emphasis only.
-- If the context doesn't have enough info, say so in one sentence.
+- If web search results are provided but none are relevant to the company, ignore them entirely — do NOT mention that they were irrelevant.
+- If the context doesn't have enough info, say so briefly — do NOT speculate or fill with generic advice like "check earnings dates" or "monitor price targets".
 """
 
 # ======================================================================
@@ -121,7 +123,7 @@ Context documents:
 {% endfor %}
 
 {% if web_results %}
-Live web search results (use to supplement context documents for recent events):
+Live web search results (use ONLY results directly relevant to the company/ticker being discussed — ignore unrelated headlines):
 {% for r in web_results %}
 ---
 [WEB | {{ r.title }} | {{ r.url }}]
@@ -256,6 +258,7 @@ def diversify_results(documents, max_per_ticker=2, max_total=10):
 def query_focused(
     query: str,
     ticker: str,
+    company_name: Optional[str] = None,
     history: Optional[List[Dict[str, str]]] = None,
 ) -> dict:
     """
@@ -304,7 +307,8 @@ def query_focused(
     # Step 3: Web search augmentation (if needed)
     web_results = []
     if needs_web_search(query, documents):
-        web_results = search_sync(f"{ticker} {query}")
+        search_label = f"{company_name} ({ticker})" if company_name else ticker
+        web_results = search_sync(f"{search_label} {query}")
         print(f"  [pipeline] web search triggered for {ticker}, got {len(web_results)} results")
 
     # Step 4: Build prompt
@@ -369,6 +373,7 @@ def query_global(
 def query_focused_stream(
     query: str,
     ticker: str,
+    company_name: Optional[str] = None,
     history: Optional[List[Dict[str, str]]] = None,
 ):
     """
@@ -413,7 +418,8 @@ def query_focused_stream(
     # Step 3: Web search augmentation (if needed)
     web_results = []
     if needs_web_search(query, documents):
-        web_results = search_sync(f"{ticker} {query}")
+        search_label = f"{company_name} ({ticker})" if company_name else ticker
+        web_results = search_sync(f"{search_label} {query}")
         print(f"  [pipeline] web search triggered for {ticker}, got {len(web_results)} results")
 
     # Step 4: Build prompt
