@@ -44,7 +44,10 @@ async def tavily_web_search(query: str, count: int = 5) -> list[dict]:
 
             result = await session.call_tool(
                 "tavily-search",
-                arguments={"query": query, "max_results": count},
+                arguments={
+                    "query": query,
+                    "max_results": count,
+                },
             )
 
             raw = result.content[0].text if result.content else ""
