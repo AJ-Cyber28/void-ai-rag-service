@@ -94,10 +94,11 @@ class ChatRequest(BaseModel):
 
 class SourceDocument(BaseModel):
     ticker: str
-    source_type: str        # "stock_profile" or "sec_filing"
+    source_type: str        # "stock_profile", "sec_filing", or "web"
     form_type: Optional[str]
     section: Optional[str]
     snippet: str            # First 200 chars of content
+    url: Optional[str] = None  # Only populated for web sources
 
 
 class ChatResponse(BaseModel):
@@ -182,6 +183,15 @@ async def chat(request: ChatRequest):
                 section=doc.meta.get("section"),
                 snippet=doc.content[:200].replace("\n", " "),
             ))
+        for web in result.get("web_results", []):
+            sources.append(SourceDocument(
+                ticker=request.ticker.upper() if request.ticker else "WEB",
+                source_type="web",
+                form_type=None,
+                section=None,
+                snippet=web.get("description", "")[:200],
+                url=web.get("url"),
+            ))
 
         return ChatResponse(
             reply=result["reply"],
@@ -228,6 +238,16 @@ async def chat_stream(request: ChatRequest):
                 "form_type": doc.meta.get("form_type"),
                 "section": doc.meta.get("section"),
                 "snippet": doc.content[:200].replace("\n", " "),
+                "url": None,
+            })
+        for web in result.get("web_results", []):
+            sources.append({
+                "ticker": request.ticker.upper() if request.ticker else "WEB",
+                "source_type": "web",
+                "form_type": None,
+                "section": None,
+                "snippet": web.get("description", "")[:200],
+                "url": web.get("url"),
             })
 
         async def event_generator():

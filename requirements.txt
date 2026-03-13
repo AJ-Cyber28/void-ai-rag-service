@@ -14,3 +14,4 @@ crewai>=0.86.0
 crewai-tools>=0.17.0
 requests>=2.31.0
 litellm
+mcp>=1.0.0

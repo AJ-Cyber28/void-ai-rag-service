@@ -22,6 +22,7 @@ from typing import List, Dict, Optional
 from collections import defaultdict
 
 from dotenv import load_dotenv
+from rag.mcp_search import search_sync
 
 # Load env
 _root = pathlib.Path(__file__).resolve().parent.parent
@@ -40,6 +41,27 @@ OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 FOCUSED_SEC_TOP_K = 6
 FOCUSED_PROFILE_TOP_K = 2
 GLOBAL_TOP_K = 15
+
+# Web search trigger keywords
+WEB_SEARCH_TRIGGER_PHRASES = [
+    "latest", "recent", "today", "this week", "this month", "right now",
+    "just announced", "breaking", "news", "earnings call", "just reported",
+    "guidance", "upgrade", "downgrade", "acquisition", "merger", "lawsuit",
+]
+
+
+def needs_web_search(query: str, retrieved_docs: list) -> bool:
+    """
+    Returns True if the query should be augmented with live Brave Search results.
+
+    Triggers if:
+      1. Query contains time-sensitive keywords, OR
+      2. Fewer than 2 relevant docs were retrieved (low vector DB coverage)
+    """
+    query_lower = query.lower()
+    has_time_signal = any(phrase in query_lower for phrase in WEB_SEARCH_TRIGGER_PHRASES)
+    low_coverage = len(retrieved_docs) < 2
+    return has_time_signal or low_coverage
 
 
 # ======================================================================
@@ -81,6 +103,16 @@ Context documents:
 {{ doc.content }}
 ---
 {% endfor %}
+
+{% if web_results %}
+Live web search results (use to supplement context documents for recent events):
+{% for r in web_results %}
+---
+[WEB | {{ r.title }} | {{ r.url }}]
+{{ r.description }}
+---
+{% endfor %}
+{% endif %}
 
 User question: {{query}}
 
@@ -253,19 +285,25 @@ def query_focused(
     # Step 2c: Combine — profiles first, then SEC filings
     documents = profile_docs + sec_docs
 
-    # Step 3: Build prompt
+    # Step 3: Web search augmentation (if needed)
+    web_results = []
+    if needs_web_search(query, documents):
+        web_results = search_sync(query)
+
+    # Step 4: Build prompt
     prompt_result = _components["prompt_builder"].run(
         query=query,
         system_prompt=SYSTEM_PROMPT,
         history=history or [],
         documents=documents,
+        web_results=web_results,
     )
 
-    # Step 4: Generate with LLM
+    # Step 5: Generate with LLM
     llm_result = _components["llm"].run(prompt=prompt_result["prompt"])
 
     reply = llm_result["replies"][0] if llm_result["replies"] else ""
-    return {"reply": reply, "documents": documents}
+    return {"reply": reply, "documents": documents, "web_results": web_results}
 
 
 def query_global(
@@ -289,19 +327,25 @@ def query_global(
     # Step 3: Diversify results
     documents = diversify_results(raw_docs)
 
-    # Step 4: Build prompt
+    # Step 4: Web search augmentation (if needed)
+    web_results = []
+    if needs_web_search(query, documents):
+        web_results = search_sync(query)
+
+    # Step 5: Build prompt
     prompt_result = _components["prompt_builder"].run(
         query=query,
         system_prompt=SYSTEM_PROMPT,
         history=history or [],
         documents=documents,
+        web_results=web_results,
     )
 
-    # Step 5: Generate with LLM
+    # Step 6: Generate with LLM
     llm_result = _components["llm"].run(prompt=prompt_result["prompt"])
 
     reply = llm_result["replies"][0] if llm_result["replies"] else ""
-    return {"reply": reply, "documents": documents}
+    return {"reply": reply, "documents": documents, "web_results": web_results}
 
 
 def query_focused_stream(
@@ -348,18 +392,24 @@ def query_focused_stream(
     # Step 2c: Combine — profiles first, then SEC filings
     documents = profile_docs + sec_docs
 
-    # Step 3: Build prompt
+    # Step 3: Web search augmentation (if needed)
+    web_results = []
+    if needs_web_search(query, documents):
+        web_results = search_sync(query)
+
+    # Step 4: Build prompt
     prompt_result = _components["prompt_builder"].run(
         query=query,
         system_prompt=SYSTEM_PROMPT,
         history=history or [],
         documents=documents,
+        web_results=web_results,
     )
 
-    # Step 4: Stream LLM response
+    # Step 5: Stream LLM response
     from openai import OpenAI
     client = OpenAI(api_key=OPENROUTER_API_KEY, base_url=OPENROUTER_BASE_URL)
-    
+
     stream = client.chat.completions.create(
         model=OPENROUTER_MODEL,
         messages=[{"role": "user", "content": prompt_result["prompt"]}],
@@ -373,7 +423,7 @@ def query_focused_stream(
                 if content:
                     yield content
 
-    return {"stream": token_generator(), "documents": documents}
+    return {"stream": token_generator(), "documents": documents, "web_results": web_results}
 
 
 def query_global_stream(
@@ -397,15 +447,21 @@ def query_global_stream(
     # Step 3: Diversify results
     documents = diversify_results(raw_docs)
 
-    # Step 4: Build prompt
+    # Step 4: Web search augmentation (if needed)
+    web_results = []
+    if needs_web_search(query, documents):
+        web_results = search_sync(query)
+
+    # Step 5: Build prompt
     prompt_result = _components["prompt_builder"].run(
         query=query,
         system_prompt=SYSTEM_PROMPT,
         history=history or [],
         documents=documents,
+        web_results=web_results,
     )
 
-    # Step 5: Stream LLM response
+    # Step 6: Stream LLM response
     from openai import OpenAI
     client = OpenAI(api_key=OPENROUTER_API_KEY, base_url=OPENROUTER_BASE_URL)
 
@@ -422,4 +478,4 @@ def query_global_stream(
                 if content:
                     yield content
 
-    return {"stream": token_generator(), "documents": documents}
+    return {"stream": token_generator(), "documents": documents, "web_results": web_results}
