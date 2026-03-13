@@ -113,7 +113,7 @@ def get_recent_filings(ticker: str, form_types: list[str] = None) -> list[dict]:
         return []
 
 
-def get_filing_text(document_url: str, max_chars: int = 50000) -> str:
+def get_filing_text(document_url: str, max_chars: int = 100000) -> str:
     """
     Fetch and clean the text of an SEC filing document.
     Returns plain text (HTML stripped), truncated to max_chars.
@@ -171,7 +171,7 @@ def get_sec_chunks(
         # Chunk into ~1000-char segments with 100-char overlap
         chunk_size = 1000
         overlap = 100
-        for i in range(0, min(len(text), 20000), chunk_size - overlap):
+        for i in range(0, min(len(text), 80000), chunk_size - overlap):
             chunk = text[i:i + chunk_size]
             if len(chunk) < 100:
                 continue
