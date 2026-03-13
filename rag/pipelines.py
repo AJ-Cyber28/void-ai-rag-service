@@ -44,9 +44,25 @@ GLOBAL_TOP_K = 15
 
 # Web search trigger keywords
 WEB_SEARCH_TRIGGER_PHRASES = [
+    # Time signals
     "latest", "recent", "today", "this week", "this month", "right now",
-    "just announced", "breaking", "news", "earnings call", "just reported",
-    "guidance", "upgrade", "downgrade", "acquisition", "merger", "lawsuit",
+    "just announced", "breaking", "news", "just reported", "just released",
+    "current", "now", "yesterday", "this quarter", "q1", "q2", "q3", "q4",
+    # Earnings & guidance
+    "earnings call", "earnings", "guidance", "forecast", "outlook",
+    "eps", "beat", "miss", "estimate", "consensus", "revenue guidance",
+    # Corporate actions
+    "upgrade", "downgrade", "acquisition", "merger", "buyout", "takeover",
+    "lawsuit", "settlement", "investigation",
+    "dividend", "buyback", "share repurchase", "stock split", "spinoff",
+    "ipo", "secondary offering", "insider buying", "insider selling",
+    # Market events
+    "price target", "analyst rating", "initiated coverage",
+    "rally", "selloff", "surge", "plunge", "dropped", "crashed",
+    # People & leadership
+    "ceo", "cfo", "management change", "resignation", "appointed",
+    # Events
+    "conference", "investor day", "annual meeting", "presentation",
 ]
 
 
