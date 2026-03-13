@@ -305,6 +305,7 @@ def query_focused(
     web_results = []
     if needs_web_search(query, documents):
         web_results = search_sync(query)
+        print(f"  [pipeline] web search triggered, got {len(web_results)} results")
 
     # Step 4: Build prompt
     prompt_result = _components["prompt_builder"].run(
@@ -347,6 +348,7 @@ def query_global(
     web_results = []
     if needs_web_search(query, documents):
         web_results = search_sync(query)
+        print(f"  [pipeline] web search triggered, got {len(web_results)} results")
 
     # Step 5: Build prompt
     prompt_result = _components["prompt_builder"].run(
@@ -412,6 +414,7 @@ def query_focused_stream(
     web_results = []
     if needs_web_search(query, documents):
         web_results = search_sync(query)
+        print(f"  [pipeline] web search triggered, got {len(web_results)} results")
 
     # Step 4: Build prompt
     prompt_result = _components["prompt_builder"].run(
@@ -467,6 +470,7 @@ def query_global_stream(
     web_results = []
     if needs_web_search(query, documents):
         web_results = search_sync(query)
+        print(f"  [pipeline] web search triggered, got {len(web_results)} results")
 
     # Step 5: Build prompt
     prompt_result = _components["prompt_builder"].run(

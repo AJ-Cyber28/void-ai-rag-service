@@ -47,18 +47,25 @@ async def tavily_web_search(query: str, count: int = 5) -> list[dict]:
             )
 
             raw = result.content[0].text if result.content else "{}"
-            # Tavily returns a JSON string with a "results" array
+            print(f"  [Tavily MCP] raw response type={type(raw)}, length={len(raw)}, preview={raw[:300]!r}")
+
+            # Tavily MCP may return JSON or a plain-text formatted string
             try:
                 data = json.loads(raw)
+                results = data.get("results", [])
+                print(f"  [Tavily MCP] parsed JSON, {len(results)} results")
             except json.JSONDecodeError:
+                # Fallback: treat raw as a plain-text answer and return it as one result
+                print(f"  [Tavily MCP] not JSON, returning raw text as single result")
+                if raw.strip():
+                    return [{"title": "Web Search Result", "url": "", "description": raw[:500]}]
                 return []
 
-            results = data.get("results", [])
             return [
                 {
                     "title": r.get("title", ""),
                     "url": r.get("url", ""),
-                    "description": r.get("content", r.get("snippet", "")),
+                    "description": r.get("content", r.get("snippet", r.get("description", ""))),
                 }
                 for r in results
             ]
