@@ -241,8 +241,9 @@ def gather_analysis_context(ticker: str) -> dict:
             pass
     print(f"  ✅ Peers: {len(peers)} sector peers")
 
-    # 6. SEC filing chunks from RAG
-    sec_chunks = _retrieve_rag_chunks(ticker, "sec_filing", top_k=8)
+    # 6. SEC filing chunks from SEC EDGAR API (on-demand)
+    from rag.mcp_sec import get_sec_chunks
+    sec_chunks = get_sec_chunks(ticker=ticker, query=f"investment analysis {ticker} risks opportunities revenue earnings", top_k=8)
     print(f"  ✅ SEC chunks: {len(sec_chunks)}")
 
     # 7. Stock profile chunks from RAG

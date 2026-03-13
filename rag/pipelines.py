@@ -23,6 +23,7 @@ from collections import defaultdict
 
 from dotenv import load_dotenv
 from rag.mcp_search import search_sync
+from rag.mcp_sec import get_sec_chunks
 
 # Load env
 _root = pathlib.Path(__file__).resolve().parent.parent
@@ -191,12 +192,6 @@ def _init_components():
 
     store = get_document_store()
 
-    # SEC filing retriever (for focused mode)
-    sec_retriever = PgvectorEmbeddingRetriever(
-        document_store=store,
-        top_k=FOCUSED_SEC_TOP_K,
-    )
-
     # Profile retriever (for focused mode)
     profile_retriever = PgvectorEmbeddingRetriever(
         document_store=store,
@@ -219,7 +214,6 @@ def _init_components():
         api_base_url=OPENROUTER_BASE_URL,
     )
 
-    _components["sec_retriever"] = sec_retriever
     _components["profile_retriever"] = profile_retriever
     _components["global_retriever"] = global_retriever
     _components["prompt_builder"] = prompt_builder
@@ -287,19 +281,16 @@ def query_focused(
     )
     profile_docs = profile_result["documents"]
 
-    # Step 2b: Retrieve SEC filing chunks for this ticker
-    sec_filters = {
-        "operator": "AND",
-        "conditions": [
-            {"field": "meta.ticker", "operator": "==", "value": ticker},
-            {"field": "meta.source_type", "operator": "==", "value": "sec_filing"},
-        ]
-    }
-    sec_result = _components["sec_retriever"].run(
-        query_embedding=query_embedding,
-        filters=sec_filters,
-    )
-    sec_docs = sec_result["documents"]
+    # Step 2b: Retrieve SEC filing chunks on-demand from SEC EDGAR API
+    from haystack.dataclasses import Document
+    raw_sec = get_sec_chunks(ticker=ticker, query=query, top_k=FOCUSED_SEC_TOP_K)
+    sec_docs = [
+        Document(content=c["content"], meta={
+            "ticker": ticker, "source_type": "sec_filing",
+            "form_type": c.get("form_type", ""), "section": c.get("section", "general"),
+        })
+        for c in raw_sec
+    ]
 
     # Step 2c: Combine — profiles first, then SEC filings
     documents = profile_docs + sec_docs
@@ -398,19 +389,16 @@ def query_focused_stream(
     )
     profile_docs = profile_result["documents"]
 
-    # Step 2b: Retrieve SEC filing chunks for this ticker
-    sec_filters = {
-        "operator": "AND",
-        "conditions": [
-            {"field": "meta.ticker", "operator": "==", "value": ticker},
-            {"field": "meta.source_type", "operator": "==", "value": "sec_filing"},
-        ]
-    }
-    sec_result = _components["sec_retriever"].run(
-        query_embedding=query_embedding,
-        filters=sec_filters,
-    )
-    sec_docs = sec_result["documents"]
+    # Step 2b: Retrieve SEC filing chunks on-demand from SEC EDGAR API
+    from haystack.dataclasses import Document
+    raw_sec = get_sec_chunks(ticker=ticker, query=query, top_k=FOCUSED_SEC_TOP_K)
+    sec_docs = [
+        Document(content=c["content"], meta={
+            "ticker": ticker, "source_type": "sec_filing",
+            "form_type": c.get("form_type", ""), "section": c.get("section", "general"),
+        })
+        for c in raw_sec
+    ]
 
     # Step 2c: Combine — profiles first, then SEC filings
     documents = profile_docs + sec_docs
