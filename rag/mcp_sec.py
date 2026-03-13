@@ -156,9 +156,14 @@ def get_sec_chunks(
     if not filings:
         return []
 
-    # Fetch text from the most recent 3 filings
+    # Prioritize 10-K/10-Q over 8-K (8-Ks are often debt/corporate events, not financials)
+    priority = [f for f in filings if f["form_type"] in ("10-K", "10-Q")]
+    secondary = [f for f in filings if f["form_type"] not in ("10-K", "10-Q")]
+    ordered = (priority + secondary)[:3]
+
+    # Fetch text from the top 3 filings
     all_chunks = []
-    for filing in filings[:3]:
+    for filing in ordered:
         text = get_filing_text(filing["document_url"])
         if not text:
             continue
