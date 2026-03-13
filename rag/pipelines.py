@@ -304,8 +304,8 @@ def query_focused(
     # Step 3: Web search augmentation (if needed)
     web_results = []
     if needs_web_search(query, documents):
-        web_results = search_sync(query)
-        print(f"  [pipeline] web search triggered, got {len(web_results)} results")
+        web_results = search_sync(f"{ticker} {query}")
+        print(f"  [pipeline] web search triggered for {ticker}, got {len(web_results)} results")
 
     # Step 4: Build prompt
     prompt_result = _components["prompt_builder"].run(
@@ -413,8 +413,8 @@ def query_focused_stream(
     # Step 3: Web search augmentation (if needed)
     web_results = []
     if needs_web_search(query, documents):
-        web_results = search_sync(query)
-        print(f"  [pipeline] web search triggered, got {len(web_results)} results")
+        web_results = search_sync(f"{ticker} {query}")
+        print(f"  [pipeline] web search triggered for {ticker}, got {len(web_results)} results")
 
     # Step 4: Build prompt
     prompt_result = _components["prompt_builder"].run(

@@ -12,6 +12,7 @@ Requires:
 """
 
 import os
+import re
 import json
 import asyncio
 import concurrent.futures
@@ -46,29 +47,45 @@ async def tavily_web_search(query: str, count: int = 5) -> list[dict]:
                 arguments={"query": query, "max_results": count},
             )
 
-            raw = result.content[0].text if result.content else "{}"
-            print(f"  [Tavily MCP] raw response type={type(raw)}, length={len(raw)}, preview={raw[:300]!r}")
+            raw = result.content[0].text if result.content else ""
+            print(f"  [Tavily MCP] length={len(raw)}, preview={raw[:200]!r}")
 
-            # Tavily MCP may return JSON or a plain-text formatted string
-            try:
-                data = json.loads(raw)
-                results = data.get("results", [])
-                print(f"  [Tavily MCP] parsed JSON, {len(results)} results")
-            except json.JSONDecodeError:
-                # Fallback: treat raw as a plain-text answer and return it as one result
-                print(f"  [Tavily MCP] not JSON, returning raw text as single result")
-                if raw.strip():
-                    return [{"title": "Web Search Result", "url": "", "description": raw[:500]}]
+            if not raw.strip():
                 return []
 
-            return [
-                {
-                    "title": r.get("title", ""),
-                    "url": r.get("url", ""),
-                    "description": r.get("content", r.get("snippet", r.get("description", ""))),
-                }
-                for r in results
-            ]
+            # Try JSON first
+            try:
+                data = json.loads(raw)
+                items = data.get("results", [])
+                print(f"  [Tavily MCP] parsed JSON, {len(items)} results")
+                return [
+                    {
+                        "title": r.get("title", ""),
+                        "url": r.get("url", ""),
+                        "description": r.get("content", r.get("snippet", "")),
+                    }
+                    for r in items
+                ]
+            except json.JSONDecodeError:
+                pass
+
+            # Parse plain-text format: "Title: ...\nURL: ...\nContent: ..."
+            results = []
+            current: dict = {}
+            for line in raw.splitlines():
+                if line.startswith("Title: "):
+                    if current.get("title"):
+                        results.append(current)
+                    current = {"title": line[7:].strip(), "url": "", "description": ""}
+                elif line.startswith("URL: "):
+                    current["url"] = line[5:].strip()
+                elif line.startswith("Content: "):
+                    current["description"] = line[9:].strip()
+            if current.get("title"):
+                results.append(current)
+
+            print(f"  [Tavily MCP] parsed plain-text, {len(results)} results")
+            return results
 
 
 def search_sync(query: str, count: int = 5) -> list[dict]:
