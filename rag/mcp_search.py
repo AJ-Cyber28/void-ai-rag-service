@@ -14,6 +14,7 @@ Requires:
 import os
 import json
 import asyncio
+import concurrent.futures
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
@@ -65,15 +66,18 @@ async def tavily_web_search(query: str, count: int = 5) -> list[dict]:
 
 def search_sync(query: str, count: int = 5) -> list[dict]:
     """
-    Synchronous wrapper for tavily_web_search — safe to call from
-    non-async contexts (e.g., inside the RAG pipeline steps).
-    Uses a fresh event loop to avoid conflicts with FastAPI's loop.
+    Synchronous wrapper for tavily_web_search.
+
+    Runs the async MCP call in a dedicated thread so it gets its own
+    event loop, isolated from FastAPI's running loop.
     """
+    def _run():
+        return asyncio.run(tavily_web_search(query, count))
+
     try:
-        loop = asyncio.new_event_loop()
-        return loop.run_until_complete(tavily_web_search(query, count))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(_run)
+            return future.result(timeout=30)
     except Exception as e:
         print(f"  Tavily Search MCP failed: {e}")
         return []
-    finally:
-        loop.close()
