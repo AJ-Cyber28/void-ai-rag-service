@@ -404,7 +404,11 @@ async def analyze_stock_stream(ticker: str, force: bool = Query(False)):
             for event in run_analysis_crew_stream(context):
                 if event.get("type") == "analysis":
                     final_analysis = event
-                yield f"data: {json.dumps(event)}\n\n"
+                    # Convert snake_case fields to camelCase for frontend
+                    formatted = format_analysis_response(event)
+                    yield f"data: {json.dumps({'type': 'analysis', **formatted})}\n\n"
+                else:
+                    yield f"data: {json.dumps(event)}\n\n"
                 await asyncio.sleep(0.01)
 
             # Cache the final analysis
