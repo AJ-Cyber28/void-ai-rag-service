@@ -12,7 +12,7 @@ Agents (autonomous debate):
   5. Investment Strategist  — synthesizes debate into final structured JSON
 
 Debate Flow (9 tasks, 2 rounds):
-  Phase 1 — Independent Research (T1-T3, no dependencies)
+  Phase 1 — Independent Research (T1-T3, run in PARALLEL via ThreadPoolExecutor)
   Phase 2 — Round 1: Bear challenges Bull, Bull defends (T4-T5)
   Phase 2 — Round 2: Bull challenges Bear, Bear defends (T6-T7)
   Phase 3 — Moderator summarizes, Strategist outputs final JSON (T8-T9)
@@ -303,28 +303,33 @@ def run_analysis_crew(context: dict) -> dict:
         temperature=0.7,
     )
 
-    # --- Format context data for prompts ---
-    news_text = json.dumps(context.get("news", []), indent=2) if context.get("news") else "No recent news available."
-
+    # --- Format context data for prompts (compact to reduce tokens) ---
     import html as html_module
+
+    news_text = json.dumps(
+        [{"headline": n.get("headline",""), "date": n.get("datetime",""), "summary": n.get("summary","")[:150]}
+         for n in context.get("news", [])],
+        separators=(",", ":")
+    ) if context.get("news") else "No recent news."
+
     sec_text = "\n\n".join([
-        f"[{c.get('form_type', 'N/A')} | Section: {c.get('section', 'general')}]\n{html_module.unescape(c.get('content', ''))}"
+        f"[{c.get('form_type','N/A')}|{c.get('section','general')}] {html_module.unescape(c.get('content',''))[:500]}"
         for c in context.get("sec_chunks", [])
-    ]) or "No SEC filing data available for this ticker."
+    ]) or "No SEC filing data available."
 
     profile_text = "\n\n".join([
-        c.get("content", "") for c in context.get("profile_chunks", [])
+        c.get("content", "")[:400] for c in context.get("profile_chunks", [])
     ]) or "No stock profile data available."
 
-    peer_info = json.dumps(context.get("peers", [])[:5], indent=2)
-    peer_cov = json.dumps(context.get("peer_coverage", []), indent=2)
+    peer_names = ", ".join([f"{p.get('ticker','')} ({p.get('name','')})" for p in context.get("peers", [])[:5]])
+    peer_cov_text = ", ".join([f"{p.get('ticker','')}: {p.get('analyst_count','?')} analysts" for p in context.get("peer_coverage", [])])
 
-    data_block = f"""COMPANY: {json.dumps(context['company'], indent=2, default=str)}
-METRICS: {json.dumps(context['metrics'], indent=2, default=str)}
-COVERAGE: {json.dumps(context['coverage'], indent=2, default=str)}
-SCORES: {json.dumps(context['scores'], indent=2, default=str)}
-PEER COMPANIES: {peer_info}
-PEER ANALYST COVERAGE: {peer_cov}
+    data_block = f"""COMPANY: {json.dumps(context['company'], separators=(",",":"), default=str)}
+METRICS: {json.dumps(context['metrics'], separators=(",",":"), default=str)}
+COVERAGE: {json.dumps(context['coverage'], separators=(",",":"), default=str)}
+SCORES: {json.dumps(context['scores'], separators=(",",":"), default=str)}
+PEERS: {peer_names}
+PEER COVERAGE: {peer_cov_text}
 
 STOCK PROFILE:
 {profile_text}
@@ -332,7 +337,7 @@ STOCK PROFILE:
 SEC FILING EXCERPTS:
 {sec_text}
 
-RECENT NEWS (last 30 days):
+RECENT NEWS:
 {news_text}"""
 
     # =====================================================================
@@ -405,11 +410,28 @@ RECENT NEWS (last 30 days):
     )
 
     # =====================================================================
-    # PHASE 1: INDEPENDENT RESEARCH (T1-T3, no dependencies)
+    # PHASE 1: INDEPENDENT RESEARCH (T1-T3, run in PARALLEL)
     # =====================================================================
 
-    t1_fundamental = Task(
-        description=f"""You are the neutral fact-finder for {company_name} ({ticker}). Analyze ALL available data and produce a comprehensive, unbiased research brief.
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    def _run_single_task(agent, description, expected_output):
+        """Run a single CrewAI task in its own crew and return output text."""
+        single_task = Task(
+            description=description,
+            expected_output=expected_output,
+            agent=agent,
+        )
+        single_crew = Crew(
+            agents=[agent],
+            tasks=[single_task],
+            process=Process.sequential,
+            verbose=False,
+        )
+        result = single_crew.kickoff()
+        return str(result.raw) if hasattr(result, "raw") else str(result)
+
+    t1_desc = f"""You are the neutral fact-finder for {company_name} ({ticker}). Analyze ALL available data and produce a comprehensive, unbiased research brief.
 
 {data_block}
 
@@ -427,13 +449,9 @@ Produce a neutral research brief covering:
 5. Recent news summary and what it signals
 6. What data is missing or limited
 
-Be strictly factual. Do NOT take a bullish or bearish stance.""",
-        expected_output="A comprehensive neutral research brief with specific numbers, filing citations, and news references. 175-220 words.",
-        agent=fundamental_researcher,
-    )
+Be strictly factual. Do NOT take a bullish or bearish stance."""
 
-    t2_bull_thesis = Task(
-        description=f"""You are the Bull Analyst for {company_name} ({ticker}). Build the strongest possible investment case.
+    t2_desc = f"""You are the Bull Analyst for {company_name} ({ticker}). Build the strongest possible investment case.
 
 {data_block}
 
@@ -445,13 +463,9 @@ Construct a compelling bull thesis covering:
 5. What would need to happen for the bull case to play out
 
 Be specific and data-driven. Cite numbers from the metrics, SEC filings, and news.
-Acknowledge weaknesses briefly but explain why the upside outweighs them.""",
-        expected_output="A passionate but data-backed bull thesis with specific price targets, catalysts, and growth arguments. 175-220 words.",
-        agent=bull_analyst,
-    )
+Acknowledge weaknesses briefly but explain why the upside outweighs them."""
 
-    t3_bear_thesis = Task(
-        description=f"""You are the Bear Analyst for {company_name} ({ticker}). Build the strongest possible case AGAINST investing.
+    t3_desc = f"""You are the Bear Analyst for {company_name} ({ticker}). Build the strongest possible case AGAINST investing.
 
 {data_block}
 
@@ -463,17 +477,53 @@ Construct a compelling bear thesis covering:
 5. What could go wrong that bulls are overlooking
 
 Be specific and data-driven. Cite numbers from the metrics, SEC filings, and news.
-Acknowledge strengths briefly but explain why the risks outweigh them.""",
-        expected_output="A rigorous bear thesis with specific risks, red flags, and downside arguments. 175-220 words.",
-        agent=bear_analyst,
-    )
+Acknowledge strengths briefly but explain why the risks outweigh them."""
+
+    print("  🚀 Phase 1: Running 3 research tasks in PARALLEL...")
+    p1_start = time.time()
+
+    phase1_outputs = {}
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        futures = {
+            executor.submit(
+                _run_single_task, fundamental_researcher, t1_desc,
+                "A comprehensive neutral research brief with specific numbers, filing citations, and news references. 175-220 words."
+            ): "fundamental",
+            executor.submit(
+                _run_single_task, bull_analyst, t2_desc,
+                "A passionate but data-backed bull thesis with specific price targets, catalysts, and growth arguments. 175-220 words."
+            ): "bull",
+            executor.submit(
+                _run_single_task, bear_analyst, t3_desc,
+                "A rigorous bear thesis with specific risks, red flags, and downside arguments. 175-220 words."
+            ): "bear",
+        }
+        for future in as_completed(futures):
+            label = futures[future]
+            try:
+                phase1_outputs[label] = future.result()
+                print(f"    ✅ {label} completed ({len(phase1_outputs[label])} chars)")
+            except Exception as e:
+                print(f"    ❌ {label} failed: {e}")
+                phase1_outputs[label] = f"Research task failed: {e}"
+
+    p1_elapsed = time.time() - p1_start
+    print(f"  ✅ Phase 1 done in {p1_elapsed:.1f}s (parallel)")
+
+    fundamental_output = phase1_outputs.get("fundamental", "No fundamental research available.")
+    bull_output = phase1_outputs.get("bull", "No bull thesis available.")
+    bear_output = phase1_outputs.get("bear", "No bear thesis available.")
 
     # =====================================================================
-    # PHASE 2, ROUND 1: Bear challenges Bull, Bull defends (T4-T5)
+    # PHASE 2+3: DEBATE ROUNDS + SYNTHESIS (sequential, 6 tasks)
+    # Phase 1 outputs are injected as text in task descriptions.
     # =====================================================================
 
     t4_bear_challenges_bull = Task(
         description=f"""The Bull Analyst has presented their investment thesis for {company_name} ({ticker}).
+
+BULL THESIS:
+{bull_output}
 
 Your job as Bear Analyst: DIRECTLY challenge their specific arguments.
 - Pick apart their strongest points with counter-evidence
@@ -484,7 +534,6 @@ Your job as Bear Analyst: DIRECTLY challenge their specific arguments.
 Be specific — reference their actual arguments, don't just repeat your own thesis.""",
         expected_output="A point-by-point challenge of the bull thesis with specific counter-arguments. 150-200 words.",
         agent=bear_analyst,
-        context=[t2_bull_thesis],
     )
 
     t5_bull_defends = Task(
@@ -499,15 +548,14 @@ Your job as Bull Analyst: DIRECTLY respond to their specific challenges.
 Be specific — address their actual challenges, don't just restate your thesis.""",
         expected_output="A direct defense responding to each bear challenge, conceding valid points and strengthening the thesis. 150-200 words.",
         agent=bull_analyst,
-        context=[t2_bull_thesis, t4_bear_challenges_bull],
+        context=[t4_bear_challenges_bull],
     )
-
-    # =====================================================================
-    # PHASE 2, ROUND 2: Bull challenges Bear, Bear defends (T6-T7)
-    # =====================================================================
 
     t6_bull_challenges_bear = Task(
         description=f"""The Bear Analyst has presented their case against {company_name} ({ticker}).
+
+BEAR THESIS:
+{bear_output}
 
 Your job as Bull Analyst: DIRECTLY challenge their specific bear arguments.
 - Explain why their risks are overstated or already priced in
@@ -518,7 +566,6 @@ Your job as Bull Analyst: DIRECTLY challenge their specific bear arguments.
 Be specific — reference their actual arguments.""",
         expected_output="A point-by-point challenge of the bear thesis with specific counter-arguments. 150-200 words.",
         agent=bull_analyst,
-        context=[t3_bear_thesis],
     )
 
     t7_bear_defends = Task(
@@ -533,20 +580,16 @@ Your job as Bear Analyst: DIRECTLY respond to their specific challenges.
 Be specific — address their actual challenges, don't just restate your thesis.""",
         expected_output="A direct defense responding to each bull challenge, conceding valid points and reinforcing key risks. 150-200 words.",
         agent=bear_analyst,
-        context=[t3_bear_thesis, t6_bull_challenges_bear],
+        context=[t6_bull_challenges_bear],
     )
-
-    # =====================================================================
-    # PHASE 3: MODERATOR SUMMARY + STRATEGIST SYNTHESIS (T8-T9)
-    # =====================================================================
 
     t8_moderator_summary = Task(
         description=f"""As Debate Moderator, summarize the full investment debate for {company_name} ({ticker}).
 
-You have access to:
-- The neutral fundamental research
-- The Bull Analyst's defense after bear challenges (Round 1)
-- The Bear Analyst's defense after bull challenges (Round 2)
+FUNDAMENTAL RESEARCH:
+{fundamental_output}
+
+You also have access to the Bull and Bear debate round outputs via task context.
 
 Produce a structured debate summary:
 1. KEY AGREEMENTS: Where bull and bear analysts converged
@@ -559,17 +602,16 @@ Produce a structured debate summary:
 Be impartial. Judge argument quality, not direction.""",
         expected_output="A structured debate summary with agreements, disagreements, strongest arguments, and confidence recommendation. 175-220 words.",
         agent=debate_moderator,
-        context=[t1_fundamental, t5_bull_defends, t7_bear_defends],
+        context=[t5_bull_defends, t7_bear_defends],
     )
 
     t9_final_synthesis = Task(
         description=f"""As Senior Investment Strategist, synthesize the full debate into a final investment analysis for {company_name} ({ticker}).
 
-You have access to:
-- The neutral fundamental research
-- The Bull Analyst's defense after bear challenges (Round 1)
-- The Bear Analyst's defense after bull challenges (Round 2)
-- The Debate Moderator's summary of agreements, disagreements, and argument quality
+FUNDAMENTAL RESEARCH:
+{fundamental_output}
+
+You also have access to the debate round outputs and moderator summary via task context.
 
 Use the debate outcomes to produce a BALANCED analysis. Arguments that survived challenge should carry more weight. Conceded points should be reflected honestly.
 
@@ -597,32 +639,33 @@ CRITICAL: Output ONLY the JSON object. No markdown, no ```json, no explanation b
 Do NOT add extra fields beyond the 7 specified above.""",
         expected_output="A valid JSON object with exactly 7 keys: hypothesis, confidence, bullCase, baseCase, bearCase, catalysts, risks.",
         agent=investment_strategist,
-        context=[t1_fundamental, t5_bull_defends, t7_bear_defends, t8_moderator_summary],
+        context=[t5_bull_defends, t7_bear_defends, t8_moderator_summary],
     )
 
     # =====================================================================
-    # EXECUTE CREW
+    # EXECUTE PHASE 2+3 CREW (6 sequential tasks)
     # =====================================================================
 
-    all_tasks = [
-        t1_fundamental, t2_bull_thesis, t3_bear_thesis,         # Phase 1
+    debate_tasks = [
         t4_bear_challenges_bull, t5_bull_defends,                # Round 1
         t6_bull_challenges_bear, t7_bear_defends,                # Round 2
         t8_moderator_summary, t9_final_synthesis,                # Synthesis
     ]
 
     crew = Crew(
-        agents=[bull_analyst, bear_analyst, fundamental_researcher, debate_moderator, investment_strategist],
-        tasks=all_tasks,
+        agents=[bull_analyst, bear_analyst, debate_moderator, investment_strategist],
+        tasks=debate_tasks,
         process=Process.sequential,
         verbose=False,
     )
 
-    print("  🚀 Crew kickoff (9 tasks, 2 debate rounds)...")
-    start_time = time.time()
+    print("  🚀 Phase 2+3: Debate rounds + synthesis (6 tasks sequential)...")
+    p2_start = time.time()
     result = crew.kickoff(inputs={"ticker": ticker})
-    elapsed = time.time() - start_time
-    print(f"  ✅ Crew finished in {elapsed:.1f}s")
+    p2_elapsed = time.time() - p2_start
+    total_elapsed = time.time() - p1_start
+    print(f"  ✅ Phase 2+3 done in {p2_elapsed:.1f}s")
+    print(f"  ✅ Total crew time: {total_elapsed:.1f}s")
 
     # =====================================================================
     # PARSE FINAL JSON OUTPUT (with logging)
@@ -638,10 +681,10 @@ Do NOT add extra fields beyond the 7 specified above.""",
         print(f"  ✅ JSON PARSE SUCCESS — confidence: {analysis['confidence']}, hypothesis length: {len(analysis.get('hypothesis', ''))}")
     else:
         print(f"  ❌ JSON PARSE FAILED on Strategist output — attempting fallback...")
-        # Fallback: try the moderator summary to see if strategist output is elsewhere
-        for fallback_idx, fallback_label in [(8, "Strategist (T9)"), (7, "Moderator (T8)")]:
-            if fallback_idx < len(all_tasks):
-                fallback_raw = str(all_tasks[fallback_idx].output) if all_tasks[fallback_idx].output else ""
+        # Fallback: try debate_tasks outputs (Strategist=idx 5, Moderator=idx 4)
+        for fallback_idx, fallback_label in [(5, "Strategist (T9)"), (4, "Moderator (T8)")]:
+            if fallback_idx < len(debate_tasks):
+                fallback_raw = str(debate_tasks[fallback_idx].output) if debate_tasks[fallback_idx].output else ""
                 if fallback_raw:
                     print(f"    Trying fallback: {fallback_label} (length: {len(fallback_raw)})...")
                     fallback = _parse_crew_json(fallback_raw)
@@ -653,13 +696,18 @@ Do NOT add extra fields beyond the 7 specified above.""",
             print(f"  ❌ ALL FALLBACKS FAILED — returning placeholder analysis")
 
     # =====================================================================
-    # BUILD DEBATE TRANSCRIPT (all 9 tasks)
+    # BUILD DEBATE TRANSCRIPT (3 parallel + 6 sequential = 9 tasks)
     # =====================================================================
 
-    task_labels = [
-        ("Fundamental Researcher", "Neutral Research Brief", "phase1"),
-        ("Bull Analyst", "Initial Bull Thesis", "phase1"),
-        ("Bear Analyst", "Initial Bear Thesis", "phase1"),
+    # Phase 1 outputs are raw strings from parallel execution
+    phase1_entries = [
+        ("Fundamental Researcher", "Neutral Research Brief", "phase1", fundamental_output),
+        ("Bull Analyst", "Initial Bull Thesis", "phase1", bull_output),
+        ("Bear Analyst", "Initial Bear Thesis", "phase1", bear_output),
+    ]
+
+    # Phase 2+3 outputs come from debate_tasks
+    phase23_labels = [
         ("Bear Analyst", "Challenges Bull Thesis (Round 1)", "round1"),
         ("Bull Analyst", "Defends Bull Thesis (Round 1)", "round1"),
         ("Bull Analyst", "Challenges Bear Thesis (Round 2)", "round2"),
@@ -669,14 +717,21 @@ Do NOT add extra fields beyond the 7 specified above.""",
     ]
 
     debate_transcript = []
-    for i, (agent_name, role_label, phase) in enumerate(task_labels):
-        full_output = str(all_tasks[i].output) if all_tasks[i].output else "Output not captured."
-        summary = _make_summary(full_output)
+    for agent_name, role_label, phase, full_output in phase1_entries:
         debate_transcript.append({
             "agent": agent_name,
             "role": role_label,
             "phase": phase,
-            "summary": summary,
+            "summary": _make_summary(full_output),
+            "fullOutput": full_output,
+        })
+    for i, (agent_name, role_label, phase) in enumerate(phase23_labels):
+        full_output = str(debate_tasks[i].output) if debate_tasks[i].output else "Output not captured."
+        debate_transcript.append({
+            "agent": agent_name,
+            "role": role_label,
+            "phase": phase,
+            "summary": _make_summary(full_output),
             "fullOutput": full_output,
         })
 
