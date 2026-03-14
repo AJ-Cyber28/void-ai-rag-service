@@ -656,7 +656,7 @@ Do NOT add extra fields beyond the 7 specified above.""",
         agents=[bull_analyst, bear_analyst, fundamental_researcher, debate_moderator, investment_strategist],
         tasks=all_tasks,
         process=Process.sequential,
-        verbose=False,
+        verbose=True,
     )
 
     print("  🚀 Crew kickoff (11 tasks, 3 debate rounds)...")
