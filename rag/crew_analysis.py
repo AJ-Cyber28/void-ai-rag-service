@@ -938,6 +938,352 @@ def _make_summary(text: str, max_len: int = 200) -> str:
 
 
 # ======================================================================
+# STREAMING ANALYSIS (yields SSE events as each task completes)
+# ======================================================================
+
+def run_analysis_crew_stream(context: dict):
+    """
+    Generator that yields SSE event dicts as each agent task completes.
+
+    Yields dicts with type:
+      {"type": "task", "agent": str, "role": str, "phase": str, "output": str, "taskIndex": int, "totalTasks": 9}
+      {"type": "analysis", ...full analysis dict...}
+      {"type": "error", "message": str}
+
+    Same logic as run_analysis_crew but broken into individual task runs
+    so we can stream after each one.
+    """
+    from crewai import Agent, Task, Crew, Process, LLM
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    ticker = context["company"]["ticker"]
+    company_name = context["company"].get("name", ticker)
+    print(f"\n🤖 [STREAM] Starting CrewAI debate for {company_name} ({ticker})...")
+
+    llm = LLM(
+        model=f"openrouter/{OPENROUTER_MODEL}",
+        api_key=OPENROUTER_API_KEY,
+        temperature=0.7,
+    )
+
+    # --- Compact data block (same as run_analysis_crew) ---
+    import html as html_module
+
+    news_text = json.dumps(
+        [{"headline": n.get("headline",""), "date": n.get("datetime",""), "summary": n.get("summary","")[:150]}
+         for n in context.get("news", [])],
+        separators=(",", ":")
+    ) if context.get("news") else "No recent news."
+
+    sec_text = "\n\n".join([
+        f"[{c.get('form_type','N/A')}|{c.get('section','general')}] {html_module.unescape(c.get('content',''))[:500]}"
+        for c in context.get("sec_chunks", [])
+    ]) or "No SEC filing data available."
+
+    profile_text = "\n\n".join([
+        c.get("content", "")[:400] for c in context.get("profile_chunks", [])
+    ]) or "No stock profile data available."
+
+    peer_names = ", ".join([f"{p.get('ticker','')} ({p.get('name','')})" for p in context.get("peers", [])[:5]])
+    peer_cov_text = ", ".join([f"{p.get('ticker','')}: {p.get('analyst_count','?')} analysts" for p in context.get("peer_coverage", [])])
+
+    data_block = f"""COMPANY: {json.dumps(context['company'], separators=(",",":"), default=str)}
+METRICS: {json.dumps(context['metrics'], separators=(",",":"), default=str)}
+COVERAGE: {json.dumps(context['coverage'], separators=(",",":"), default=str)}
+SCORES: {json.dumps(context['scores'], separators=(",",":"), default=str)}
+PEERS: {peer_names}
+PEER COVERAGE: {peer_cov_text}
+
+STOCK PROFILE:
+{profile_text}
+
+SEC FILING EXCERPTS:
+{sec_text}
+
+RECENT NEWS:
+{news_text}"""
+
+    # --- Agents ---
+    bull_analyst = Agent(role="Bull Analyst", goal=f"Build the strongest possible investment case FOR {ticker}, grounded in data", backstory="You are a conviction-driven equity analyst who specializes in finding upside in under-covered stocks. You argue passionately but always back your points with specific data.", llm=llm, verbose=False)
+    bear_analyst = Agent(role="Bear Analyst", goal=f"Build the strongest possible case AGAINST investing in {ticker}, grounded in data", backstory="You are a skeptical risk analyst who specializes in finding what can go wrong. You challenge every bullish assumption with specific counter-evidence.", llm=llm, verbose=False)
+    fundamental_researcher = Agent(role="Fundamental Research Analyst", goal=f"Provide a neutral, fact-based analysis of {ticker} using SEC filings, news, and market data", backstory="You are a neutral fundamental equity researcher who presents facts without bias. You never take a bullish or bearish stance.", llm=llm, verbose=False)
+    debate_moderator = Agent(role="Debate Moderator", goal=f"Summarize the key agreements, disagreements, and unresolved questions from the {ticker} debate", backstory="You are a senior research director who moderates investment debates. You are completely impartial and focus on argument quality.", llm=llm, verbose=False)
+    investment_strategist = Agent(role="Senior Investment Strategist", goal=f"Synthesize the full debate into a structured investment analysis with bull/base/bear cases for {ticker}", backstory="You are a senior investment strategist who reads adversarial debate transcripts and produces balanced, actionable investment theses.", llm=llm, verbose=False)
+
+    def _run_task(agent, description, expected_output):
+        task = Task(description=description, expected_output=expected_output, agent=agent)
+        crew = Crew(agents=[agent], tasks=[task], process=Process.sequential, verbose=False)
+        result = crew.kickoff()
+        return str(result.raw) if hasattr(result, "raw") else str(result)
+
+    total_tasks = 9
+    task_idx = 0
+    debate_transcript = []
+    p1_start = time.time()
+
+    def _emit(agent_name, role_label, phase, output):
+        nonlocal task_idx
+        task_idx += 1
+        entry = {
+            "type": "task",
+            "agent": agent_name,
+            "role": role_label,
+            "phase": phase,
+            "output": output,
+            "summary": _make_summary(output),
+            "taskIndex": task_idx,
+            "totalTasks": total_tasks,
+        }
+        debate_transcript.append({
+            "agent": agent_name,
+            "role": role_label,
+            "phase": phase,
+            "summary": _make_summary(output),
+            "fullOutput": output,
+        })
+        return entry
+
+    # ===== PHASE 1: PARALLEL RESEARCH =====
+    print("  🚀 [STREAM] Phase 1: 3 parallel research tasks...")
+
+    t1_desc = f"""You are the neutral fact-finder for {company_name} ({ticker}). Analyze ALL available data and produce a comprehensive, unbiased research brief.
+
+{data_block}
+
+Coverage Gap Scoring methodology:
+- Coverage Score (50%): How under-covered vs sector/size peers. 0 analysts = highest score.
+- Activity Score (30%): Volume, volatility, and momentum signals.
+- Quality Score (20%): Market cap, liquidity, data completeness.
+- Gap Score = weighted combination. Higher = bigger opportunity.
+
+Produce a neutral research brief covering:
+1. Company overview and business model
+2. Key financial metrics and how they compare to peers
+3. Coverage gap interpretation (what the scores mean)
+4. SEC filing highlights (risks, MD&A, material events)
+5. Recent news summary and what it signals
+6. What data is missing or limited
+
+Be strictly factual. Do NOT take a bullish or bearish stance."""
+
+    t2_desc = f"""You are the Bull Analyst for {company_name} ({ticker}). Build the strongest possible investment case.
+
+{data_block}
+
+Construct a compelling bull thesis covering:
+1. Why this stock's coverage gap represents an alpha opportunity
+2. Key growth catalysts and upside drivers
+3. Why the market is undervaluing or ignoring this stock
+4. Specific data points that support your bullish view
+5. What would need to happen for the bull case to play out
+
+Be specific and data-driven. Cite numbers from the metrics, SEC filings, and news.
+Acknowledge weaknesses briefly but explain why the upside outweighs them."""
+
+    t3_desc = f"""You are the Bear Analyst for {company_name} ({ticker}). Build the strongest possible case AGAINST investing.
+
+{data_block}
+
+Construct a compelling bear thesis covering:
+1. Why the coverage gap might exist for good reasons (market is right to ignore)
+2. Key risks, red flags, and downside scenarios
+3. Business model weaknesses and competitive threats
+4. Specific data points that support your bearish view
+5. What could go wrong that bulls are overlooking
+
+Be specific and data-driven. Cite numbers from the metrics, SEC filings, and news.
+Acknowledge strengths briefly but explain why the risks outweigh them."""
+
+    phase1_outputs = {}
+    phase1_meta = {
+        "fundamental": ("Fundamental Research Analyst", fundamental_researcher, t1_desc, "A comprehensive neutral research brief with specific numbers, filing citations, and news references. 175-220 words."),
+        "bull": ("Bull Analyst", bull_analyst, t2_desc, "A passionate but data-backed bull thesis with specific price targets, catalysts, and growth arguments. 175-220 words."),
+        "bear": ("Bear Analyst", bear_analyst, t3_desc, "A rigorous bear thesis with specific risks, red flags, and downside arguments. 175-220 words."),
+    }
+    phase1_roles = {
+        "fundamental": ("Neutral Research Brief", "phase1"),
+        "bull": ("Initial Bull Thesis", "phase1"),
+        "bear": ("Initial Bear Thesis", "phase1"),
+    }
+
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        futures = {
+            executor.submit(_run_task, meta[1], meta[2], meta[3]): key
+            for key, meta in phase1_meta.items()
+        }
+        for future in as_completed(futures):
+            key = futures[future]
+            try:
+                output = future.result()
+                phase1_outputs[key] = output
+                agent_name = phase1_meta[key][0]
+                role_label, phase = phase1_roles[key]
+                print(f"    ✅ [STREAM] {key} completed ({len(output)} chars)")
+                yield _emit(agent_name, role_label, phase, output)
+            except Exception as e:
+                phase1_outputs[key] = f"Research task failed: {e}"
+                agent_name = phase1_meta[key][0]
+                role_label, phase = phase1_roles[key]
+                yield _emit(agent_name, role_label, phase, f"Task failed: {e}")
+
+    p1_elapsed = time.time() - p1_start
+    print(f"  ✅ [STREAM] Phase 1 done in {p1_elapsed:.1f}s")
+
+    fundamental_output = phase1_outputs.get("fundamental", "No fundamental research available.")
+    bull_output = phase1_outputs.get("bull", "No bull thesis available.")
+    bear_output = phase1_outputs.get("bear", "No bear thesis available.")
+
+    # ===== PHASE 2: DEBATE ROUNDS (sequential, individual tasks) =====
+    phase2_tasks = [
+        ("Bear Analyst", "Challenges Bull Thesis (Round 1)", "round1", bear_analyst,
+         f"""The Bull Analyst has presented their investment thesis for {company_name} ({ticker}).
+
+BULL THESIS:
+{bull_output}
+
+Your job as Bear Analyst: DIRECTLY challenge their specific arguments.
+- Pick apart their strongest points with counter-evidence
+- Identify assumptions they're making that may not hold
+- Point out data they're ignoring or misinterpreting
+- Explain why their catalysts may not materialize
+
+Be specific — reference their actual arguments, don't just repeat your own thesis.""",
+         "A point-by-point challenge of the bull thesis with specific counter-arguments. 150-200 words."),
+    ]
+
+    # T4: Bear challenges bull
+    print("  🚀 [STREAM] T4: Bear challenges bull...")
+    t4_output = _run_task(*[phase2_tasks[0][i] for i in [3, 4, 5]])
+    yield _emit(phase2_tasks[0][0], phase2_tasks[0][1], phase2_tasks[0][2], t4_output)
+
+    # T5: Bull defends
+    print("  🚀 [STREAM] T5: Bull defends...")
+    t5_output = _run_task(bull_analyst, f"""The Bear Analyst has challenged your bull thesis for {company_name} ({ticker}).
+
+BEAR'S CHALLENGES:
+{t4_output}
+
+Your job as Bull Analyst: DIRECTLY respond to their specific challenges.
+- Defend your strongest points with additional evidence
+- Concede any valid criticisms honestly
+- Explain why their counter-arguments don't invalidate your core thesis
+- Strengthen any weak points they exposed
+
+Be specific — address their actual challenges, don't just restate your thesis.""",
+        "A direct defense responding to each bear challenge, conceding valid points and strengthening the thesis. 150-200 words.")
+    yield _emit("Bull Analyst", "Defends Bull Thesis (Round 1)", "round1", t5_output)
+
+    # T6: Bull challenges bear
+    print("  🚀 [STREAM] T6: Bull challenges bear...")
+    t6_output = _run_task(bull_analyst, f"""The Bear Analyst has presented their case against {company_name} ({ticker}).
+
+BEAR THESIS:
+{bear_output}
+
+Your job as Bull Analyst: DIRECTLY challenge their specific bear arguments.
+- Explain why their risks are overstated or already priced in
+- Point out positive developments they're ignoring
+- Challenge their interpretation of the data
+- Explain why their worst-case scenario is unlikely
+
+Be specific — reference their actual arguments.""",
+        "A point-by-point challenge of the bear thesis with specific counter-arguments. 150-200 words.")
+    yield _emit("Bull Analyst", "Challenges Bear Thesis (Round 2)", "round2", t6_output)
+
+    # T7: Bear defends
+    print("  🚀 [STREAM] T7: Bear defends...")
+    t7_output = _run_task(bear_analyst, f"""The Bull Analyst has challenged your bear thesis for {company_name} ({ticker}).
+
+BULL'S CHALLENGES:
+{t6_output}
+
+Your job as Bear Analyst: DIRECTLY respond to their specific challenges.
+- Defend your risk assessment with additional evidence
+- Concede any valid counter-points honestly
+- Explain why their optimism doesn't address your core concerns
+- Identify any new risks that emerged from the debate
+
+Be specific — address their actual challenges, don't just restate your thesis.""",
+        "A direct defense responding to each bull challenge, conceding valid points and reinforcing key risks. 150-200 words.")
+    yield _emit("Bear Analyst", "Defends Bear Thesis (Round 2)", "round2", t7_output)
+
+    # ===== PHASE 3: MODERATOR + STRATEGIST =====
+    # T8: Moderator
+    print("  🚀 [STREAM] T8: Moderator summary...")
+    t8_output = _run_task(debate_moderator, f"""As Debate Moderator, summarize the full investment debate for {company_name} ({ticker}).
+
+FUNDAMENTAL RESEARCH:
+{fundamental_output}
+
+BULL DEFENSE (Round 1):
+{t5_output}
+
+BEAR DEFENSE (Round 2):
+{t7_output}
+
+Produce a structured debate summary:
+1. KEY AGREEMENTS: Where bull and bear analysts converged
+2. KEY DISAGREEMENTS: Where they fundamentally disagree and why
+3. STRONGEST BULL ARGUMENT: Which bull point was hardest for the bear to counter?
+4. STRONGEST BEAR ARGUMENT: Which bear point was hardest for the bull to counter?
+5. UNRESOLVED QUESTIONS: What information would resolve the debate?
+6. RECOMMENDED CONFIDENCE RANGE: Based on argument quality, what confidence range (e.g., 40-60) is appropriate?
+
+Be impartial. Judge argument quality, not direction.""",
+        "A structured debate summary with agreements, disagreements, strongest arguments, and confidence recommendation. 175-220 words.")
+    yield _emit("Debate Moderator", "Debate Summary", "synthesis", t8_output)
+
+    # T9: Strategist
+    print("  🚀 [STREAM] T9: Final synthesis...")
+    t9_output = _run_task(investment_strategist, f"""As Senior Investment Strategist, synthesize the full debate into a final investment analysis for {company_name} ({ticker}).
+
+FUNDAMENTAL RESEARCH:
+{fundamental_output}
+
+BULL DEFENSE (Round 1):
+{t5_output}
+
+BEAR DEFENSE (Round 2):
+{t7_output}
+
+MODERATOR SUMMARY:
+{t8_output}
+
+Use the debate outcomes to produce a BALANCED analysis. Arguments that survived challenge should carry more weight.
+
+You MUST output ONLY valid JSON (no markdown code fences, no preamble, no trailing text) with this EXACT structure:
+{{
+  "hypothesis": "2-4 sentence investment thesis informed by the debate.",
+  "confidence": <integer 0-100>,
+  "bullCase": {{"title": "Bull Case", "points": ["point 1", "point 2", "point 3"]}},
+  "baseCase": {{"title": "Base Case", "points": ["point 1", "point 2", "point 3"]}},
+  "bearCase": {{"title": "Bear Case", "points": ["point 1", "point 2", "point 3"]}},
+  "catalysts": [{{"event": "Catalyst name", "date": "Q1 2026"}}],
+  "risks": [{{"risk": "Risk name", "severity": "high"}}]
+}}
+
+CRITICAL: Output ONLY the JSON object. No markdown, no explanation.""",
+        "A valid JSON object with exactly 7 keys: hypothesis, confidence, bullCase, baseCase, bearCase, catalysts, risks.")
+    yield _emit("Investment Strategist", "Final Analysis", "synthesis", t9_output)
+
+    total_elapsed = time.time() - p1_start
+    print(f"  ✅ [STREAM] Total crew time: {total_elapsed:.1f}s")
+
+    # ===== PARSE & YIELD FINAL ANALYSIS =====
+    analysis = _parse_crew_json(t9_output)
+    if analysis.get("confidence", 0) == 0 or analysis.get("hypothesis", "").startswith("Analysis generation"):
+        # Fallback to moderator
+        fallback = _parse_crew_json(t8_output)
+        if fallback.get("confidence", 0) > 0:
+            analysis = fallback
+
+    analysis["debate_transcript"] = debate_transcript
+    analysis["news_context"] = context.get("news", [])
+
+    yield {"type": "analysis", **analysis}
+
+
+# ======================================================================
 # CACHE HELPERS (Supabase ai_analyses table)
 # ======================================================================
 

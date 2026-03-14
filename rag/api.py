@@ -4,8 +4,9 @@ Void AI RAG + CrewAI Analysis Service
 Endpoints:
   POST /chat          — RAG chat (focused or global mode)
   POST /chat/stream   — RAG chat with SSE streaming
-  GET  /analysis/{ticker}  — Fetch cached AI analysis
-  POST /analyze/{ticker}   — Generate AI analysis via CrewAI agents
+  GET  /analysis/{ticker}        — Fetch cached AI analysis
+  POST /analyze/{ticker}         — Generate AI analysis via CrewAI agents
+  POST /analyze/{ticker}/stream  — Generate AI analysis with live SSE streaming
   GET  /health        — Health check
 
 Called by the Next.js frontend (Vercel).
@@ -47,6 +48,7 @@ from rag.pipelines import query_focused, query_global, query_focused_stream, que
 from rag.crew_analysis import (
     gather_analysis_context,
     run_analysis_crew,
+    run_analysis_crew_stream,
     get_cached_analysis,
     upsert_analysis,
     format_analysis_response,
@@ -356,6 +358,72 @@ async def analyze_stock(ticker: str, force: bool = Query(False)):
     })
 
     return response
+
+
+@app.post("/analyze/{ticker}/stream")
+async def analyze_stock_stream(ticker: str, force: bool = Query(False)):
+    """
+    Generate AI analysis with SSE streaming — yields each agent's output
+    as it completes so the frontend can show a live debate feed.
+
+    Events:
+      data: {"type": "task", "agent": "...", "role": "...", "phase": "...", "output": "...", "taskIndex": N, "totalTasks": 9}
+      data: {"type": "analysis", ...full analysis...}
+      data: [DONE]
+    """
+    ticker = ticker.upper()
+
+    # Check cache first (unless forced)
+    if not force:
+        cached = get_cached_analysis(ticker)
+        if cached and not cached.get("is_stale", False):
+            # Return cached as a single SSE event + DONE
+            async def cached_stream():
+                response = format_analysis_response(cached)
+                yield f"data: {json.dumps({'type': 'analysis', **response})}\n\n"
+                yield "data: [DONE]\n\n"
+            return StreamingResponse(
+                cached_stream(),
+                media_type="text/event-stream",
+                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+            )
+
+    # Gather context
+    try:
+        context = gather_analysis_context(ticker)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to gather data for {ticker}: {str(e)}")
+
+    # Stream the crew execution
+    async def event_generator():
+        import asyncio
+        try:
+            final_analysis = None
+            for event in run_analysis_crew_stream(context):
+                if event.get("type") == "analysis":
+                    final_analysis = event
+                yield f"data: {json.dumps(event)}\n\n"
+                await asyncio.sleep(0.01)
+
+            # Cache the final analysis
+            if final_analysis:
+                gap_score = context.get("scores", {}).get("gap_score")
+                if gap_score is not None:
+                    gap_score = float(gap_score)
+                upsert_analysis(ticker, final_analysis, gap_score)
+
+            yield "data: [DONE]\n\n"
+        except Exception as e:
+            yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+            yield "data: [DONE]\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 # ======================================================================
