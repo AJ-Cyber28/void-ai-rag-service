@@ -11,12 +11,11 @@ Agents (autonomous debate):
   4. Debate Moderator       — summarizes key agreements/disagreements
   5. Investment Strategist  — synthesizes debate into final structured JSON
 
-Debate Flow (11 tasks, 3 rounds):
+Debate Flow (9 tasks, 2 rounds):
   Phase 1 — Independent Research (T1-T3, no dependencies)
   Phase 2 — Round 1: Bear challenges Bull, Bull defends (T4-T5)
   Phase 2 — Round 2: Bull challenges Bear, Bear defends (T6-T7)
-  Phase 2 — Round 3: Both revise given Fundamental findings (T8-T9)
-  Phase 3 — Moderator summarizes, Strategist outputs final JSON (T10-T11)
+  Phase 3 — Moderator summarizes, Strategist outputs final JSON (T8-T9)
 
 Usage:
     from rag.crew_analysis import gather_analysis_context, run_analysis_crew
@@ -283,7 +282,7 @@ def run_analysis_crew(context: dict) -> dict:
     Execute the autonomous 5-agent debate crew and return parsed analysis JSON + debate transcript.
 
     Agents: Bull Analyst, Bear Analyst, Fundamental Researcher, Debate Moderator, Investment Strategist
-    Flow: 3 phases, 11 tasks, 3 debate rounds.
+    Flow: 3 phases, 9 tasks, 2 debate rounds.
 
     Returns a dict matching the ai_analyses schema:
     {
@@ -429,7 +428,7 @@ Produce a neutral research brief covering:
 6. What data is missing or limited
 
 Be strictly factual. Do NOT take a bullish or bearish stance.""",
-        expected_output="A comprehensive neutral research brief with specific numbers, filing citations, and news references. 300-400 words.",
+        expected_output="A comprehensive neutral research brief with specific numbers, filing citations, and news references. 175-220 words.",
         agent=fundamental_researcher,
     )
 
@@ -447,7 +446,7 @@ Construct a compelling bull thesis covering:
 
 Be specific and data-driven. Cite numbers from the metrics, SEC filings, and news.
 Acknowledge weaknesses briefly but explain why the upside outweighs them.""",
-        expected_output="A passionate but data-backed bull thesis with specific price targets, catalysts, and growth arguments. 200-300 words.",
+        expected_output="A passionate but data-backed bull thesis with specific price targets, catalysts, and growth arguments. 175-220 words.",
         agent=bull_analyst,
     )
 
@@ -465,7 +464,7 @@ Construct a compelling bear thesis covering:
 
 Be specific and data-driven. Cite numbers from the metrics, SEC filings, and news.
 Acknowledge strengths briefly but explain why the risks outweigh them.""",
-        expected_output="A rigorous bear thesis with specific risks, red flags, and downside arguments. 200-300 words.",
+        expected_output="A rigorous bear thesis with specific risks, red flags, and downside arguments. 175-220 words.",
         agent=bear_analyst,
     )
 
@@ -483,7 +482,7 @@ Your job as Bear Analyst: DIRECTLY challenge their specific arguments.
 - Explain why their catalysts may not materialize
 
 Be specific — reference their actual arguments, don't just repeat your own thesis.""",
-        expected_output="A point-by-point challenge of the bull thesis with specific counter-arguments. 150-250 words.",
+        expected_output="A point-by-point challenge of the bull thesis with specific counter-arguments. 150-200 words.",
         agent=bear_analyst,
         context=[t2_bull_thesis],
     )
@@ -498,7 +497,7 @@ Your job as Bull Analyst: DIRECTLY respond to their specific challenges.
 - Strengthen any weak points they exposed
 
 Be specific — address their actual challenges, don't just restate your thesis.""",
-        expected_output="A direct defense responding to each bear challenge, conceding valid points and strengthening the thesis. 150-250 words.",
+        expected_output="A direct defense responding to each bear challenge, conceding valid points and strengthening the thesis. 150-200 words.",
         agent=bull_analyst,
         context=[t2_bull_thesis, t4_bear_challenges_bull],
     )
@@ -517,7 +516,7 @@ Your job as Bull Analyst: DIRECTLY challenge their specific bear arguments.
 - Explain why their worst-case scenario is unlikely
 
 Be specific — reference their actual arguments.""",
-        expected_output="A point-by-point challenge of the bear thesis with specific counter-arguments. 150-250 words.",
+        expected_output="A point-by-point challenge of the bear thesis with specific counter-arguments. 150-200 words.",
         agent=bull_analyst,
         context=[t3_bear_thesis],
     )
@@ -532,62 +531,22 @@ Your job as Bear Analyst: DIRECTLY respond to their specific challenges.
 - Identify any new risks that emerged from the debate
 
 Be specific — address their actual challenges, don't just restate your thesis.""",
-        expected_output="A direct defense responding to each bull challenge, conceding valid points and reinforcing key risks. 150-250 words.",
+        expected_output="A direct defense responding to each bull challenge, conceding valid points and reinforcing key risks. 150-200 words.",
         agent=bear_analyst,
         context=[t3_bear_thesis, t6_bull_challenges_bear],
     )
 
     # =====================================================================
-    # PHASE 2, ROUND 3: Both revise given Fundamental findings (T8-T9)
+    # PHASE 3: MODERATOR SUMMARY + STRATEGIST SYNTHESIS (T8-T9)
     # =====================================================================
 
-    t8_bull_final = Task(
-        description=f"""Final round for {company_name} ({ticker}). You've debated the Bear Analyst for two rounds.
-
-Now review the Fundamental Researcher's neutral findings alongside the full debate.
-
-As Bull Analyst, produce your FINAL REVISED position:
-- What bull arguments survived the debate strongest?
-- What did you concede to the Bear?
-- How do the neutral fundamental findings affect your thesis?
-- What is your final confidence level (0-100) in the bull case?
-- What are the 2-3 most important catalysts?
-
-Be honest about what weakened and what held up.""",
-        expected_output="A final revised bull position incorporating debate outcomes and fundamental findings. 150-250 words.",
-        agent=bull_analyst,
-        context=[t1_fundamental, t5_bull_defends, t7_bear_defends],
-    )
-
-    t9_bear_final = Task(
-        description=f"""Final round for {company_name} ({ticker}). You've debated the Bull Analyst for two rounds.
-
-Now review the Fundamental Researcher's neutral findings alongside the full debate.
-
-As Bear Analyst, produce your FINAL REVISED position:
-- What bear arguments survived the debate strongest?
-- What did you concede to the Bull?
-- How do the neutral fundamental findings affect your risk assessment?
-- What is your final confidence level (0-100) in the bear case?
-- What are the 2-3 most critical risks?
-
-Be honest about what weakened and what held up.""",
-        expected_output="A final revised bear position incorporating debate outcomes and fundamental findings. 150-250 words.",
-        agent=bear_analyst,
-        context=[t1_fundamental, t5_bull_defends, t7_bear_defends],
-    )
-
-    # =====================================================================
-    # PHASE 3: MODERATOR SUMMARY + STRATEGIST SYNTHESIS (T10-T11)
-    # =====================================================================
-
-    t10_moderator_summary = Task(
+    t8_moderator_summary = Task(
         description=f"""As Debate Moderator, summarize the full investment debate for {company_name} ({ticker}).
 
 You have access to:
 - The neutral fundamental research
-- The Bull Analyst's final revised position
-- The Bear Analyst's final revised position
+- The Bull Analyst's defense after bear challenges (Round 1)
+- The Bear Analyst's defense after bull challenges (Round 2)
 
 Produce a structured debate summary:
 1. KEY AGREEMENTS: Where bull and bear analysts converged
@@ -598,18 +557,18 @@ Produce a structured debate summary:
 6. RECOMMENDED CONFIDENCE RANGE: Based on argument quality, what confidence range (e.g., 40-60) is appropriate?
 
 Be impartial. Judge argument quality, not direction.""",
-        expected_output="A structured debate summary with agreements, disagreements, strongest arguments, and confidence recommendation. 200-300 words.",
+        expected_output="A structured debate summary with agreements, disagreements, strongest arguments, and confidence recommendation. 175-220 words.",
         agent=debate_moderator,
-        context=[t1_fundamental, t8_bull_final, t9_bear_final],
+        context=[t1_fundamental, t5_bull_defends, t7_bear_defends],
     )
 
-    t11_final_synthesis = Task(
+    t9_final_synthesis = Task(
         description=f"""As Senior Investment Strategist, synthesize the full debate into a final investment analysis for {company_name} ({ticker}).
 
 You have access to:
 - The neutral fundamental research
-- The Bull Analyst's final position (post-debate)
-- The Bear Analyst's final position (post-debate)
+- The Bull Analyst's defense after bear challenges (Round 1)
+- The Bear Analyst's defense after bull challenges (Round 2)
 - The Debate Moderator's summary of agreements, disagreements, and argument quality
 
 Use the debate outcomes to produce a BALANCED analysis. Arguments that survived challenge should carry more weight. Conceded points should be reflected honestly.
@@ -638,7 +597,7 @@ CRITICAL: Output ONLY the JSON object. No markdown, no ```json, no explanation b
 Do NOT add extra fields beyond the 7 specified above.""",
         expected_output="A valid JSON object with exactly 7 keys: hypothesis, confidence, bullCase, baseCase, bearCase, catalysts, risks.",
         agent=investment_strategist,
-        context=[t1_fundamental, t8_bull_final, t9_bear_final, t10_moderator_summary],
+        context=[t1_fundamental, t5_bull_defends, t7_bear_defends, t8_moderator_summary],
     )
 
     # =====================================================================
@@ -649,8 +608,7 @@ Do NOT add extra fields beyond the 7 specified above.""",
         t1_fundamental, t2_bull_thesis, t3_bear_thesis,         # Phase 1
         t4_bear_challenges_bull, t5_bull_defends,                # Round 1
         t6_bull_challenges_bear, t7_bear_defends,                # Round 2
-        t8_bull_final, t9_bear_final,                            # Round 3
-        t10_moderator_summary, t11_final_synthesis,              # Synthesis
+        t8_moderator_summary, t9_final_synthesis,                # Synthesis
     ]
 
     crew = Crew(
@@ -660,7 +618,7 @@ Do NOT add extra fields beyond the 7 specified above.""",
         verbose=False,
     )
 
-    print("  🚀 Crew kickoff (11 tasks, 3 debate rounds)...")
+    print("  🚀 Crew kickoff (9 tasks, 2 debate rounds)...")
     start_time = time.time()
     result = crew.kickoff(inputs={"ticker": ticker})
     elapsed = time.time() - start_time
@@ -681,7 +639,7 @@ Do NOT add extra fields beyond the 7 specified above.""",
     else:
         print(f"  ❌ JSON PARSE FAILED on Strategist output — attempting fallback...")
         # Fallback: try the moderator summary to see if strategist output is elsewhere
-        for fallback_idx, fallback_label in [(10, "Strategist (T11)"), (9, "Moderator (T10)")]:
+        for fallback_idx, fallback_label in [(8, "Strategist (T9)"), (7, "Moderator (T8)")]:
             if fallback_idx < len(all_tasks):
                 fallback_raw = str(all_tasks[fallback_idx].output) if all_tasks[fallback_idx].output else ""
                 if fallback_raw:
@@ -695,7 +653,7 @@ Do NOT add extra fields beyond the 7 specified above.""",
             print(f"  ❌ ALL FALLBACKS FAILED — returning placeholder analysis")
 
     # =====================================================================
-    # BUILD DEBATE TRANSCRIPT (all 11 tasks)
+    # BUILD DEBATE TRANSCRIPT (all 9 tasks)
     # =====================================================================
 
     task_labels = [
@@ -706,8 +664,6 @@ Do NOT add extra fields beyond the 7 specified above.""",
         ("Bull Analyst", "Defends Bull Thesis (Round 1)", "round1"),
         ("Bull Analyst", "Challenges Bear Thesis (Round 2)", "round2"),
         ("Bear Analyst", "Defends Bear Thesis (Round 2)", "round2"),
-        ("Bull Analyst", "Final Revised Position (Round 3)", "round3"),
-        ("Bear Analyst", "Final Revised Position (Round 3)", "round3"),
         ("Debate Moderator", "Debate Summary", "synthesis"),
         ("Investment Strategist", "Final Analysis", "synthesis"),
     ]
