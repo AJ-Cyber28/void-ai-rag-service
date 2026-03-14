@@ -1,15 +1,22 @@
 """
 CrewAI Investment Analysis System for Void AI.
 
-Runs a crew of 5 specialized agents to generate structured investment analysis
-for a given stock ticker using data from Supabase, RAG (SEC filings), and Finnhub news.
+Runs an autonomous crew of 5 specialized agents that debate and challenge
+each other to produce robust investment analysis for a given stock ticker.
 
-Agents (sequential):
-  1. Data Analyst         — quantitative data brief
-  2. Coverage Specialist  — gap score interpretation
-  3. Fundamental Researcher — SEC filings + news insights
-  4. Investment Strategist — synthesizes bull/base/bear cases
-  5. Devil's Advocate      — challenges and refines the thesis
+Agents (autonomous debate):
+  1. Bull Analyst           — advocates for the investment, finds upside
+  2. Bear Analyst           — argues against, finds risks and red flags
+  3. Fundamental Researcher — neutral fact-finder (SEC filings, news, data)
+  4. Debate Moderator       — summarizes key agreements/disagreements
+  5. Investment Strategist  — synthesizes debate into final structured JSON
+
+Debate Flow (11 tasks, 3 rounds):
+  Phase 1 — Independent Research (T1-T3, no dependencies)
+  Phase 2 — Round 1: Bear challenges Bull, Bull defends (T4-T5)
+  Phase 2 — Round 2: Bull challenges Bear, Bear defends (T6-T7)
+  Phase 2 — Round 3: Both revise given Fundamental findings (T8-T9)
+  Phase 3 — Moderator summarizes, Strategist outputs final JSON (T10-T11)
 
 Usage:
     from rag.crew_analysis import gather_analysis_context, run_analysis_crew
@@ -273,7 +280,10 @@ def gather_analysis_context(ticker: str) -> dict:
 
 def run_analysis_crew(context: dict) -> dict:
     """
-    Execute the full 5-agent crew and return parsed analysis JSON + debate transcript.
+    Execute the autonomous 5-agent debate crew and return parsed analysis JSON + debate transcript.
+
+    Agents: Bull Analyst, Bear Analyst, Fundamental Researcher, Debate Moderator, Investment Strategist
+    Flow: 3 phases, 11 tasks, 3 debate rounds.
 
     Returns a dict matching the ai_analyses schema:
     {
@@ -285,74 +295,13 @@ def run_analysis_crew(context: dict) -> dict:
 
     ticker = context["company"]["ticker"]
     company_name = context["company"].get("name", ticker)
-    print(f"\n🤖 Starting CrewAI analysis for {company_name} ({ticker})...")
+    print(f"\n🤖 Starting CrewAI autonomous debate for {company_name} ({ticker})...")
 
     # --- LLM config ---
     llm = LLM(
         model=f"openrouter/{OPENROUTER_MODEL}",
         api_key=OPENROUTER_API_KEY,
         temperature=0.7,
-    )
-
-    # --- Agent definitions ---
-    data_analyst = Agent(
-        role="Quantitative Data Analyst",
-        goal=f"Produce a precise numerical brief for {ticker} using market data, peer comparisons, and recent news",
-        backstory=(
-            "You are a quantitative equity analyst who specializes in distilling raw market data "
-            "into clear, actionable briefs. You focus on numbers, trends, peer context, and "
-            "any recent news that explains price action — never opinions or recommendations."
-        ),
-        llm=llm,
-        verbose=False,
-    )
-
-    coverage_specialist = Agent(
-        role="Coverage Gap Specialist",
-        goal=f"Interpret why {ticker} is under-covered and what that means for investors",
-        backstory=(
-            "You are Void AI's proprietary coverage gap expert. You deeply understand the "
-            "Gap Score methodology (50% Coverage + 30% Activity + 20% Quality) and can explain "
-            "what coverage gaps mean for price discovery and alpha opportunity."
-        ),
-        llm=llm,
-        verbose=False,
-    )
-
-    fundamental_researcher = Agent(
-        role="Fundamental Research Analyst",
-        goal=f"Extract key business insights from SEC filings, news, and fundamentals for {ticker}",
-        backstory=(
-            "You are a fundamental equity research analyst who reads SEC filings (10-K, 10-Q, 8-K) "
-            "and recent news to understand a company's business model, risks, competitive position, "
-            "and recent material events."
-        ),
-        llm=llm,
-        verbose=False,
-    )
-
-    investment_strategist = Agent(
-        role="Senior Investment Strategist",
-        goal=f"Synthesize all research into a structured investment analysis with bull/base/bear cases for {ticker}",
-        backstory=(
-            "You are a senior investment strategist who takes inputs from your research team "
-            "and produces actionable investment theses. You think in scenarios (bull/base/bear) "
-            "and always ground your analysis in specific data points."
-        ),
-        llm=llm,
-        verbose=False,
-    )
-
-    devils_advocate = Agent(
-        role="Devil's Advocate Analyst",
-        goal=f"Challenge and refine the investment analysis for {ticker} to make it more balanced and robust",
-        backstory=(
-            "You are a contrarian analyst whose job is to stress-test investment theses. "
-            "You look for over-optimism, under-appreciated risks, and logical gaps. "
-            "You make analyses stronger, not weaker."
-        ),
-        llm=llm,
-        verbose=False,
     )
 
     # --- Format context data for prompts ---
@@ -370,56 +319,12 @@ def run_analysis_crew(context: dict) -> dict:
     peer_info = json.dumps(context.get("peers", [])[:5], indent=2)
     peer_cov = json.dumps(context.get("peer_coverage", []), indent=2)
 
-    # --- Task definitions ---
-    task_data_brief = Task(
-        description=f"""Analyze the following market data for {company_name} ({ticker}) and produce a structured data brief.
-
-COMPANY: {json.dumps(context['company'], indent=2, default=str)}
+    data_block = f"""COMPANY: {json.dumps(context['company'], indent=2, default=str)}
 METRICS: {json.dumps(context['metrics'], indent=2, default=str)}
 COVERAGE: {json.dumps(context['coverage'], indent=2, default=str)}
+SCORES: {json.dumps(context['scores'], indent=2, default=str)}
 PEER COMPANIES: {peer_info}
 PEER ANALYST COVERAGE: {peer_cov}
-
-RECENT NEWS (last 30 days):
-{news_text}
-
-Produce a concise data brief covering:
-1. Current price positioning (vs 52-week range)
-2. Volume and trading activity trends
-3. Price momentum (1-month and 3-month)
-4. Volatility profile
-5. How this stock compares to its sector peers on these metrics
-6. Any notable recent news events that may explain recent price/volume action""",
-        expected_output="A structured quantitative brief with specific numbers, peer comparisons, and relevant news context. Around 300-500 words.",
-        agent=data_analyst,
-    )
-
-    task_gap_analysis = Task(
-        description=f"""Interpret the coverage gap for {company_name} ({ticker}).
-
-SCORES: {json.dumps(context['scores'], indent=2, default=str)}
-COVERAGE: {json.dumps(context['coverage'], indent=2, default=str)}
-PEER ANALYST COVERAGE: {peer_cov}
-
-Scoring methodology:
-- Coverage Score (50%): How under-covered vs sector/size peers. 0 analysts = highest score.
-- Activity Score (30%): Volume, volatility, and momentum signals. High activity = market interest.
-- Quality Score (20%): Market cap, liquidity, data completeness. Filters out untradeable names.
-- Gap Score = weighted combination. Higher = bigger opportunity.
-- Opportunity types: High Priority (75+), Strong Opportunity (60-74), Moderate (45-59), Low Priority (<45)
-
-Using the data brief from your colleague, explain:
-1. Why this stock is under-covered relative to its peers
-2. Whether this is a sector-wide pattern or company-specific
-3. What the high activity + low coverage implies for price discovery
-4. How confident we should be in this thesis given the confidence score""",
-        expected_output="An analytical interpretation of the coverage gap with specific score references. Around 200-400 words.",
-        agent=coverage_specialist,
-        context=[task_data_brief],
-    )
-
-    task_fundamental = Task(
-        description=f"""Analyze the SEC filings, recent news, and fundamental data for {company_name} ({ticker}).
 
 STOCK PROFILE:
 {profile_text}
@@ -428,136 +333,392 @@ SEC FILING EXCERPTS:
 {sec_text}
 
 RECENT NEWS (last 30 days):
-{news_text}
+{news_text}"""
 
-Extract and summarize:
-1. Key business risks from risk factors
-2. Management's forward-looking statements (MD&A)
-3. Recent material events from BOTH filings AND news headlines (earnings, leadership, acquisitions, restructuring, partnerships, lawsuits)
-4. Competitive positioning and business model strengths/weaknesses
-5. If SEC data or news is limited, note what's missing and work with available data
+    # =====================================================================
+    # AGENT DEFINITIONS (5 agents)
+    # =====================================================================
 
-Use news headlines to identify the most current developments that SEC filings (which are backward-looking) may not yet capture.""",
-        expected_output="A qualitative fundamental research summary with filing citations and news references. Around 300-500 words.",
+    bull_analyst = Agent(
+        role="Bull Analyst",
+        goal=f"Build the strongest possible investment case FOR {ticker}, grounded in data",
+        backstory=(
+            "You are a conviction-driven equity analyst who specializes in finding upside "
+            "in under-covered stocks. You look for catalysts, growth drivers, coverage gaps "
+            "that create alpha opportunities, and reasons the market is undervaluing this stock. "
+            "You argue passionately but always back your points with specific data."
+        ),
+        llm=llm,
+        verbose=False,
+    )
+
+    bear_analyst = Agent(
+        role="Bear Analyst",
+        goal=f"Build the strongest possible case AGAINST investing in {ticker}, grounded in data",
+        backstory=(
+            "You are a skeptical risk analyst who specializes in finding what can go wrong. "
+            "You look for overvaluation signals, business model weaknesses, competitive threats, "
+            "governance red flags, and reasons the market might be right to ignore this stock. "
+            "You challenge every bullish assumption with specific counter-evidence."
+        ),
+        llm=llm,
+        verbose=False,
+    )
+
+    fundamental_researcher = Agent(
+        role="Fundamental Research Analyst",
+        goal=f"Provide a neutral, fact-based analysis of {ticker} using SEC filings, news, and market data",
+        backstory=(
+            "You are a neutral fundamental equity researcher who presents facts without bias. "
+            "You read SEC filings (10-K, 10-Q, 8-K), analyze market data, and summarize news — "
+            "always distinguishing between facts and opinions. You never take a bullish or bearish "
+            "stance; you provide the evidence and let others draw conclusions."
+        ),
+        llm=llm,
+        verbose=False,
+    )
+
+    debate_moderator = Agent(
+        role="Debate Moderator",
+        goal=f"Summarize the key agreements, disagreements, and unresolved questions from the {ticker} debate",
+        backstory=(
+            "You are a senior research director who moderates investment debates. "
+            "You identify where the bull and bear analysts agree, where they fundamentally "
+            "disagree, which arguments were strongest, and what questions remain unresolved. "
+            "You are completely impartial and focus on the quality of arguments, not their direction."
+        ),
+        llm=llm,
+        verbose=False,
+    )
+
+    investment_strategist = Agent(
+        role="Senior Investment Strategist",
+        goal=f"Synthesize the full debate into a structured investment analysis with bull/base/bear cases for {ticker}",
+        backstory=(
+            "You are a senior investment strategist who reads adversarial debate transcripts "
+            "and produces balanced, actionable investment theses. You weigh bull and bear arguments "
+            "based on evidence quality, not volume. You think in scenarios (bull/base/bear) "
+            "and set confidence levels based on how well arguments survived challenge."
+        ),
+        llm=llm,
+        verbose=False,
+    )
+
+    # =====================================================================
+    # PHASE 1: INDEPENDENT RESEARCH (T1-T3, no dependencies)
+    # =====================================================================
+
+    t1_fundamental = Task(
+        description=f"""You are the neutral fact-finder for {company_name} ({ticker}). Analyze ALL available data and produce a comprehensive, unbiased research brief.
+
+{data_block}
+
+Coverage Gap Scoring methodology:
+- Coverage Score (50%): How under-covered vs sector/size peers. 0 analysts = highest score.
+- Activity Score (30%): Volume, volatility, and momentum signals.
+- Quality Score (20%): Market cap, liquidity, data completeness.
+- Gap Score = weighted combination. Higher = bigger opportunity.
+
+Produce a neutral research brief covering:
+1. Company overview and business model
+2. Key financial metrics and how they compare to peers
+3. Coverage gap interpretation (what the scores mean)
+4. SEC filing highlights (risks, MD&A, material events)
+5. Recent news summary and what it signals
+6. What data is missing or limited
+
+Be strictly factual. Do NOT take a bullish or bearish stance.""",
+        expected_output="A comprehensive neutral research brief with specific numbers, filing citations, and news references. 400-600 words.",
         agent=fundamental_researcher,
     )
 
-    task_synthesize = Task(
-        description=f"""Synthesize all research from your team into a complete investment analysis for {company_name} ({ticker}).
+    t2_bull_thesis = Task(
+        description=f"""You are the Bull Analyst for {company_name} ({ticker}). Build the strongest possible investment case.
+
+{data_block}
+
+Construct a compelling bull thesis covering:
+1. Why this stock's coverage gap represents an alpha opportunity
+2. Key growth catalysts and upside drivers
+3. Why the market is undervaluing or ignoring this stock
+4. Specific data points that support your bullish view
+5. What would need to happen for the bull case to play out
+
+Be specific and data-driven. Cite numbers from the metrics, SEC filings, and news.
+Acknowledge weaknesses briefly but explain why the upside outweighs them.""",
+        expected_output="A passionate but data-backed bull thesis with specific price targets, catalysts, and growth arguments. 300-500 words.",
+        agent=bull_analyst,
+    )
+
+    t3_bear_thesis = Task(
+        description=f"""You are the Bear Analyst for {company_name} ({ticker}). Build the strongest possible case AGAINST investing.
+
+{data_block}
+
+Construct a compelling bear thesis covering:
+1. Why the coverage gap might exist for good reasons (market is right to ignore)
+2. Key risks, red flags, and downside scenarios
+3. Business model weaknesses and competitive threats
+4. Specific data points that support your bearish view
+5. What could go wrong that bulls are overlooking
+
+Be specific and data-driven. Cite numbers from the metrics, SEC filings, and news.
+Acknowledge strengths briefly but explain why the risks outweigh them.""",
+        expected_output="A rigorous bear thesis with specific risks, red flags, and downside arguments. 300-500 words.",
+        agent=bear_analyst,
+    )
+
+    # =====================================================================
+    # PHASE 2, ROUND 1: Bear challenges Bull, Bull defends (T4-T5)
+    # =====================================================================
+
+    t4_bear_challenges_bull = Task(
+        description=f"""The Bull Analyst has presented their investment thesis for {company_name} ({ticker}).
+
+Your job as Bear Analyst: DIRECTLY challenge their specific arguments.
+- Pick apart their strongest points with counter-evidence
+- Identify assumptions they're making that may not hold
+- Point out data they're ignoring or misinterpreting
+- Explain why their catalysts may not materialize
+
+Be specific — reference their actual arguments, don't just repeat your own thesis.""",
+        expected_output="A point-by-point challenge of the bull thesis with specific counter-arguments. 200-400 words.",
+        agent=bear_analyst,
+        context=[t2_bull_thesis],
+    )
+
+    t5_bull_defends = Task(
+        description=f"""The Bear Analyst has challenged your bull thesis for {company_name} ({ticker}).
+
+Your job as Bull Analyst: DIRECTLY respond to their specific challenges.
+- Defend your strongest points with additional evidence
+- Concede any valid criticisms honestly
+- Explain why their counter-arguments don't invalidate your core thesis
+- Strengthen any weak points they exposed
+
+Be specific — address their actual challenges, don't just restate your thesis.""",
+        expected_output="A direct defense responding to each bear challenge, conceding valid points and strengthening the thesis. 200-400 words.",
+        agent=bull_analyst,
+        context=[t2_bull_thesis, t4_bear_challenges_bull],
+    )
+
+    # =====================================================================
+    # PHASE 2, ROUND 2: Bull challenges Bear, Bear defends (T6-T7)
+    # =====================================================================
+
+    t6_bull_challenges_bear = Task(
+        description=f"""The Bear Analyst has presented their case against {company_name} ({ticker}).
+
+Your job as Bull Analyst: DIRECTLY challenge their specific bear arguments.
+- Explain why their risks are overstated or already priced in
+- Point out positive developments they're ignoring
+- Challenge their interpretation of the data
+- Explain why their worst-case scenario is unlikely
+
+Be specific — reference their actual arguments.""",
+        expected_output="A point-by-point challenge of the bear thesis with specific counter-arguments. 200-400 words.",
+        agent=bull_analyst,
+        context=[t3_bear_thesis],
+    )
+
+    t7_bear_defends = Task(
+        description=f"""The Bull Analyst has challenged your bear thesis for {company_name} ({ticker}).
+
+Your job as Bear Analyst: DIRECTLY respond to their specific challenges.
+- Defend your risk assessment with additional evidence
+- Concede any valid counter-points honestly
+- Explain why their optimism doesn't address your core concerns
+- Identify any new risks that emerged from the debate
+
+Be specific — address their actual challenges, don't just restate your thesis.""",
+        expected_output="A direct defense responding to each bull challenge, conceding valid points and reinforcing key risks. 200-400 words.",
+        agent=bear_analyst,
+        context=[t3_bear_thesis, t6_bull_challenges_bear],
+    )
+
+    # =====================================================================
+    # PHASE 2, ROUND 3: Both revise given Fundamental findings (T8-T9)
+    # =====================================================================
+
+    t8_bull_final = Task(
+        description=f"""Final round for {company_name} ({ticker}). You've debated the Bear Analyst for two rounds.
+
+Now review the Fundamental Researcher's neutral findings alongside the full debate.
+
+As Bull Analyst, produce your FINAL REVISED position:
+- What bull arguments survived the debate strongest?
+- What did you concede to the Bear?
+- How do the neutral fundamental findings affect your thesis?
+- What is your final confidence level (0-100) in the bull case?
+- What are the 2-3 most important catalysts?
+
+Be honest about what weakened and what held up.""",
+        expected_output="A final revised bull position incorporating debate outcomes and fundamental findings. 200-400 words.",
+        agent=bull_analyst,
+        context=[t1_fundamental, t5_bull_defends, t7_bear_defends],
+    )
+
+    t9_bear_final = Task(
+        description=f"""Final round for {company_name} ({ticker}). You've debated the Bull Analyst for two rounds.
+
+Now review the Fundamental Researcher's neutral findings alongside the full debate.
+
+As Bear Analyst, produce your FINAL REVISED position:
+- What bear arguments survived the debate strongest?
+- What did you concede to the Bull?
+- How do the neutral fundamental findings affect your risk assessment?
+- What is your final confidence level (0-100) in the bear case?
+- What are the 2-3 most critical risks?
+
+Be honest about what weakened and what held up.""",
+        expected_output="A final revised bear position incorporating debate outcomes and fundamental findings. 200-400 words.",
+        agent=bear_analyst,
+        context=[t1_fundamental, t5_bull_defends, t7_bear_defends],
+    )
+
+    # =====================================================================
+    # PHASE 3: MODERATOR SUMMARY + STRATEGIST SYNTHESIS (T10-T11)
+    # =====================================================================
+
+    t10_moderator_summary = Task(
+        description=f"""As Debate Moderator, summarize the full investment debate for {company_name} ({ticker}).
 
 You have access to:
-- The quantitative data brief (Agent 1)
-- The coverage gap interpretation (Agent 2)
-- The fundamental research summary (Agent 3)
+- The neutral fundamental research
+- The Bull Analyst's final revised position
+- The Bear Analyst's final revised position
+
+Produce a structured debate summary:
+1. KEY AGREEMENTS: Where bull and bear analysts converged
+2. KEY DISAGREEMENTS: Where they fundamentally disagree and why
+3. STRONGEST BULL ARGUMENT: Which bull point was hardest for the bear to counter?
+4. STRONGEST BEAR ARGUMENT: Which bear point was hardest for the bull to counter?
+5. UNRESOLVED QUESTIONS: What information would resolve the debate?
+6. RECOMMENDED CONFIDENCE RANGE: Based on argument quality, what confidence range (e.g., 40-60) is appropriate?
+
+Be impartial. Judge argument quality, not direction.""",
+        expected_output="A structured debate summary with agreements, disagreements, strongest arguments, and confidence recommendation. 300-500 words.",
+        agent=debate_moderator,
+        context=[t1_fundamental, t8_bull_final, t9_bear_final],
+    )
+
+    t11_final_synthesis = Task(
+        description=f"""As Senior Investment Strategist, synthesize the full debate into a final investment analysis for {company_name} ({ticker}).
+
+You have access to:
+- The neutral fundamental research
+- The Bull Analyst's final position (post-debate)
+- The Bear Analyst's final position (post-debate)
+- The Debate Moderator's summary of agreements, disagreements, and argument quality
+
+Use the debate outcomes to produce a BALANCED analysis. Arguments that survived challenge should carry more weight. Conceded points should be reflected honestly.
 
 You MUST output ONLY valid JSON (no markdown code fences, no preamble, no trailing text) with this EXACT structure:
 {{
-  "hypothesis": "2-4 sentence investment thesis specific to this stock's coverage gap opportunity",
-  "confidence": <integer 0-100>,
-  "bullCase": {{"title": "Bull Case", "points": ["point 1", "point 2", "point 3", "point 4"]}},
-  "baseCase": {{"title": "Base Case", "points": ["point 1", "point 2", "point 3"]}},
-  "bearCase": {{"title": "Bear Case", "points": ["point 1", "point 2", "point 3", "point 4"]}},
+  "hypothesis": "2-4 sentence investment thesis informed by the debate. Reference what the debate revealed.",
+  "confidence": <integer 0-100, informed by the moderator's recommended range>,
+  "bullCase": {{"title": "Bull Case", "points": ["point 1 (survived debate)", "point 2", "point 3", "point 4"]}},
+  "baseCase": {{"title": "Base Case", "points": ["point 1 (where bull and bear agreed)", "point 2", "point 3"]}},
+  "bearCase": {{"title": "Bear Case", "points": ["point 1 (survived debate)", "point 2", "point 3", "point 4"]}},
   "catalysts": [{{"event": "Catalyst name", "date": "Q1 2026"}}, {{"event": "Another", "date": "H1 2026"}}],
   "risks": [{{"risk": "Risk name", "severity": "high"}}, {{"risk": "Another", "severity": "medium"}}]
 }}
 
 Rules:
-- hypothesis: Must reference the specific coverage gap opportunity — why this stock is under-covered and why that matters
-- confidence: Reflect data quality, gap score confidence, and SEC data availability
-- bullCase: 3-4 specific, data-backed points (each point should be 1 sentence)
-- baseCase: 2-3 realistic continuation scenario points
-- bearCase: 3-4 genuine risks, not generic warnings
-- catalysts: 3-5 with realistic timeframes (Q1 2026, H1 2026, Monthly, etc.)
-- risks: 3-5 with severity ratings (high/medium/low) based on likelihood and impact
+- hypothesis: Must reference the coverage gap AND what the debate revealed about this investment
+- confidence: Use the moderator's recommended range as a guide. Reflect how well the bull case survived challenge.
+- bullCase: 3-4 points that SURVIVED bear challenges (strongest arguments)
+- baseCase: 2-3 points where BOTH sides agreed (consensus view)
+- bearCase: 3-4 risks that SURVIVED bull challenges (genuine concerns)
+- catalysts: 3-5 with realistic timeframes
+- risks: 3-5 with severity ratings based on debate outcomes
 
-CRITICAL: Output ONLY the JSON object. No markdown, no ```json, no explanation before or after.""",
-        expected_output="A valid JSON object with hypothesis, confidence, bullCase, baseCase, bearCase, catalysts, and risks.",
+CRITICAL: Output ONLY the JSON object. No markdown, no ```json, no explanation before or after.
+Do NOT add extra fields beyond the 7 specified above.""",
+        expected_output="A valid JSON object with exactly 7 keys: hypothesis, confidence, bullCase, baseCase, bearCase, catalysts, risks.",
         agent=investment_strategist,
-        context=[task_data_brief, task_gap_analysis, task_fundamental],
+        context=[t1_fundamental, t8_bull_final, t9_bear_final, t10_moderator_summary],
     )
 
-    task_refine = Task(
-        description=f"""Review and refine the investment analysis JSON for {company_name} ({ticker}).
+    # =====================================================================
+    # EXECUTE CREW
+    # =====================================================================
 
-The Investment Strategist produced a JSON analysis. Your job:
-1. Challenge overly optimistic bull case points — are they realistic given the data?
-2. Ensure bear case points are genuinely concerning, not just generic "risks exist"
-3. Adjust confidence if the thesis seems over/under-confident given the available data
-4. Add any missing catalysts or risks you noticed from the research
-5. Sharpen the hypothesis to be more specific and actionable
+    all_tasks = [
+        t1_fundamental, t2_bull_thesis, t3_bear_thesis,         # Phase 1
+        t4_bear_challenges_bull, t5_bull_defends,                # Round 1
+        t6_bull_challenges_bear, t7_bear_defends,                # Round 2
+        t8_bull_final, t9_bear_final,                            # Round 3
+        t10_moderator_summary, t11_final_synthesis,              # Synthesis
+    ]
 
-STRICT OUTPUT RULES:
-- Output ONLY a valid JSON object. Nothing else.
-- Do NOT wrap in markdown code fences (no ```json or ```).
-- Do NOT add any text before or after the JSON.
-- Do NOT use markdown formatting (no ** or ### or --- ) inside JSON string values.
-- Do NOT add extra fields beyond what is specified below.
-- Keep all string values as plain text without any markdown.
-
-The JSON must have EXACTLY these 7 top-level keys and no others:
-{{
-  "hypothesis": "plain text, 2-4 sentences",
-  "confidence": <integer 0-100>,
-  "bullCase": {{"title": "Bull Case", "points": ["plain text point", ...]}},
-  "baseCase": {{"title": "Base Case", "points": ["plain text point", ...]}},
-  "bearCase": {{"title": "Bear Case", "points": ["plain text point", ...]}},
-  "catalysts": [{{"event": "plain text", "date": "timeframe"}}, ...],
-  "risks": [{{"risk": "plain text", "severity": "high|medium|low"}}, ...]
-}}
-
-Do NOT add fields like "keyMissingData", "revisedThesis", "alternativeViewpoints", "finalAssessment", "notes", "probability", "mitigation", or "counter". ONLY the 7 keys above.""",
-        expected_output="A single valid JSON object with exactly 7 keys: hypothesis, confidence, bullCase, baseCase, bearCase, catalysts, risks. No markdown, no extra fields.",
-        agent=devils_advocate,
-        context=[task_data_brief, task_gap_analysis, task_fundamental, task_synthesize],
-    )
-
-    tasks = [task_data_brief, task_gap_analysis, task_fundamental, task_synthesize, task_refine]
-
-    # --- Execute crew ---
     crew = Crew(
-        agents=[data_analyst, coverage_specialist, fundamental_researcher, investment_strategist, devils_advocate],
-        tasks=tasks,
+        agents=[bull_analyst, bear_analyst, fundamental_researcher, debate_moderator, investment_strategist],
+        tasks=all_tasks,
         process=Process.sequential,
         verbose=False,
     )
 
-    print("  🚀 Crew kickoff...")
+    print("  🚀 Crew kickoff (11 tasks, 3 debate rounds)...")
     start_time = time.time()
     result = crew.kickoff(inputs={"ticker": ticker})
     elapsed = time.time() - start_time
     print(f"  ✅ Crew finished in {elapsed:.1f}s")
 
-    # --- Parse final JSON output ---
+    # =====================================================================
+    # PARSE FINAL JSON OUTPUT (with logging)
+    # =====================================================================
+
     raw_output = str(result.raw) if hasattr(result, "raw") else str(result)
+    print(f"  📋 Final output length: {len(raw_output)} chars")
+    print(f"  📋 Final output preview: {raw_output[:200]}...")
+
     analysis = _parse_crew_json(raw_output)
 
-    # If Devil's Advocate output failed to parse, try the Strategist's output (task 4)
-    if analysis.get("confidence", 0) == 0 and analysis.get("hypothesis", "").startswith("Analysis generation"):
-        print("  ⚠️ Devil's Advocate output unparseable, falling back to Strategist output...")
-        strategist_output = str(tasks[3].output) if tasks[3].output else ""
-        if strategist_output:
-            fallback = _parse_crew_json(strategist_output)
-            if fallback.get("confidence", 0) > 0:
-                analysis = fallback
-                print("  ✅ Successfully parsed Strategist output as fallback")
+    if analysis.get("confidence", 0) > 0 and not analysis.get("hypothesis", "").startswith("Analysis generation"):
+        print(f"  ✅ JSON PARSE SUCCESS — confidence: {analysis['confidence']}, hypothesis length: {len(analysis.get('hypothesis', ''))}")
+    else:
+        print(f"  ❌ JSON PARSE FAILED on Strategist output — attempting fallback...")
+        # Fallback: try the moderator summary to see if strategist output is elsewhere
+        for fallback_idx, fallback_label in [(10, "Strategist (T11)"), (9, "Moderator (T10)")]:
+            if fallback_idx < len(all_tasks):
+                fallback_raw = str(all_tasks[fallback_idx].output) if all_tasks[fallback_idx].output else ""
+                if fallback_raw:
+                    print(f"    Trying fallback: {fallback_label} (length: {len(fallback_raw)})...")
+                    fallback = _parse_crew_json(fallback_raw)
+                    if fallback.get("confidence", 0) > 0:
+                        analysis = fallback
+                        print(f"    ✅ Fallback {fallback_label} parsed successfully")
+                        break
+        else:
+            print(f"  ❌ ALL FALLBACKS FAILED — returning placeholder analysis")
 
-    # --- Build debate transcript ---
-    agent_labels = [
-        ("Data Analyst", "Quantitative Brief"),
-        ("Coverage Specialist", "Gap Interpretation"),
-        ("Fundamental Analyst", "SEC & News Insights"),
-        ("Strategist", "Initial Thesis"),
-        ("Devil's Advocate", "Final Refinement"),
+    # =====================================================================
+    # BUILD DEBATE TRANSCRIPT (all 11 tasks)
+    # =====================================================================
+
+    task_labels = [
+        ("Fundamental Researcher", "Neutral Research Brief", "phase1"),
+        ("Bull Analyst", "Initial Bull Thesis", "phase1"),
+        ("Bear Analyst", "Initial Bear Thesis", "phase1"),
+        ("Bear Analyst", "Challenges Bull Thesis (Round 1)", "round1"),
+        ("Bull Analyst", "Defends Bull Thesis (Round 1)", "round1"),
+        ("Bull Analyst", "Challenges Bear Thesis (Round 2)", "round2"),
+        ("Bear Analyst", "Defends Bear Thesis (Round 2)", "round2"),
+        ("Bull Analyst", "Final Revised Position (Round 3)", "round3"),
+        ("Bear Analyst", "Final Revised Position (Round 3)", "round3"),
+        ("Debate Moderator", "Debate Summary", "synthesis"),
+        ("Investment Strategist", "Final Analysis", "synthesis"),
     ]
 
     debate_transcript = []
-    for i, (agent_name, role_label) in enumerate(agent_labels):
-        full_output = str(tasks[i].output) if tasks[i].output else "Output not captured."
-        # Extract a clean summary (first ~200 chars, ending at a sentence boundary)
+    for i, (agent_name, role_label, phase) in enumerate(task_labels):
+        full_output = str(all_tasks[i].output) if all_tasks[i].output else "Output not captured."
         summary = _make_summary(full_output)
         debate_transcript.append({
             "agent": agent_name,
             "role": role_label,
+            "phase": phase,
             "summary": summary,
             "fullOutput": full_output,
         })
