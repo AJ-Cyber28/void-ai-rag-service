@@ -250,7 +250,7 @@ def gather_analysis_context(ticker: str) -> dict:
 
     # 6. SEC filing chunks from SEC EDGAR API (on-demand)
     from rag.mcp_sec import get_sec_chunks
-    sec_chunks = get_sec_chunks(ticker=ticker, query=f"investment analysis {ticker} risks opportunities revenue earnings", top_k=8)
+    sec_chunks = get_sec_chunks(ticker=ticker, query=f"investment analysis {ticker} risks opportunities revenue earnings", top_k=5)
     print(f"  ✅ SEC chunks: {len(sec_chunks)}")
 
     # 7. Stock profile chunks from RAG
@@ -307,8 +307,9 @@ def run_analysis_crew(context: dict) -> dict:
     # --- Format context data for prompts ---
     news_text = json.dumps(context.get("news", []), indent=2) if context.get("news") else "No recent news available."
 
+    import html as html_module
     sec_text = "\n\n".join([
-        f"[{c.get('source_type', 'unknown')} | {c.get('form_type', 'N/A')} | Section: {c.get('section', 'general')}]\n{c.get('content', '')}"
+        f"[{c.get('form_type', 'N/A')} | Section: {c.get('section', 'general')}]\n{html_module.unescape(c.get('content', ''))}"
         for c in context.get("sec_chunks", [])
     ]) or "No SEC filing data available for this ticker."
 
@@ -428,7 +429,7 @@ Produce a neutral research brief covering:
 6. What data is missing or limited
 
 Be strictly factual. Do NOT take a bullish or bearish stance.""",
-        expected_output="A comprehensive neutral research brief with specific numbers, filing citations, and news references. 400-600 words.",
+        expected_output="A comprehensive neutral research brief with specific numbers, filing citations, and news references. 300-400 words.",
         agent=fundamental_researcher,
     )
 
@@ -446,7 +447,7 @@ Construct a compelling bull thesis covering:
 
 Be specific and data-driven. Cite numbers from the metrics, SEC filings, and news.
 Acknowledge weaknesses briefly but explain why the upside outweighs them.""",
-        expected_output="A passionate but data-backed bull thesis with specific price targets, catalysts, and growth arguments. 300-500 words.",
+        expected_output="A passionate but data-backed bull thesis with specific price targets, catalysts, and growth arguments. 200-300 words.",
         agent=bull_analyst,
     )
 
@@ -464,7 +465,7 @@ Construct a compelling bear thesis covering:
 
 Be specific and data-driven. Cite numbers from the metrics, SEC filings, and news.
 Acknowledge strengths briefly but explain why the risks outweigh them.""",
-        expected_output="A rigorous bear thesis with specific risks, red flags, and downside arguments. 300-500 words.",
+        expected_output="A rigorous bear thesis with specific risks, red flags, and downside arguments. 200-300 words.",
         agent=bear_analyst,
     )
 
@@ -482,7 +483,7 @@ Your job as Bear Analyst: DIRECTLY challenge their specific arguments.
 - Explain why their catalysts may not materialize
 
 Be specific — reference their actual arguments, don't just repeat your own thesis.""",
-        expected_output="A point-by-point challenge of the bull thesis with specific counter-arguments. 200-400 words.",
+        expected_output="A point-by-point challenge of the bull thesis with specific counter-arguments. 150-250 words.",
         agent=bear_analyst,
         context=[t2_bull_thesis],
     )
@@ -497,7 +498,7 @@ Your job as Bull Analyst: DIRECTLY respond to their specific challenges.
 - Strengthen any weak points they exposed
 
 Be specific — address their actual challenges, don't just restate your thesis.""",
-        expected_output="A direct defense responding to each bear challenge, conceding valid points and strengthening the thesis. 200-400 words.",
+        expected_output="A direct defense responding to each bear challenge, conceding valid points and strengthening the thesis. 150-250 words.",
         agent=bull_analyst,
         context=[t2_bull_thesis, t4_bear_challenges_bull],
     )
@@ -516,7 +517,7 @@ Your job as Bull Analyst: DIRECTLY challenge their specific bear arguments.
 - Explain why their worst-case scenario is unlikely
 
 Be specific — reference their actual arguments.""",
-        expected_output="A point-by-point challenge of the bear thesis with specific counter-arguments. 200-400 words.",
+        expected_output="A point-by-point challenge of the bear thesis with specific counter-arguments. 150-250 words.",
         agent=bull_analyst,
         context=[t3_bear_thesis],
     )
@@ -531,7 +532,7 @@ Your job as Bear Analyst: DIRECTLY respond to their specific challenges.
 - Identify any new risks that emerged from the debate
 
 Be specific — address their actual challenges, don't just restate your thesis.""",
-        expected_output="A direct defense responding to each bull challenge, conceding valid points and reinforcing key risks. 200-400 words.",
+        expected_output="A direct defense responding to each bull challenge, conceding valid points and reinforcing key risks. 150-250 words.",
         agent=bear_analyst,
         context=[t3_bear_thesis, t6_bull_challenges_bear],
     )
@@ -553,7 +554,7 @@ As Bull Analyst, produce your FINAL REVISED position:
 - What are the 2-3 most important catalysts?
 
 Be honest about what weakened and what held up.""",
-        expected_output="A final revised bull position incorporating debate outcomes and fundamental findings. 200-400 words.",
+        expected_output="A final revised bull position incorporating debate outcomes and fundamental findings. 150-250 words.",
         agent=bull_analyst,
         context=[t1_fundamental, t5_bull_defends, t7_bear_defends],
     )
@@ -571,7 +572,7 @@ As Bear Analyst, produce your FINAL REVISED position:
 - What are the 2-3 most critical risks?
 
 Be honest about what weakened and what held up.""",
-        expected_output="A final revised bear position incorporating debate outcomes and fundamental findings. 200-400 words.",
+        expected_output="A final revised bear position incorporating debate outcomes and fundamental findings. 150-250 words.",
         agent=bear_analyst,
         context=[t1_fundamental, t5_bull_defends, t7_bear_defends],
     )
@@ -597,7 +598,7 @@ Produce a structured debate summary:
 6. RECOMMENDED CONFIDENCE RANGE: Based on argument quality, what confidence range (e.g., 40-60) is appropriate?
 
 Be impartial. Judge argument quality, not direction.""",
-        expected_output="A structured debate summary with agreements, disagreements, strongest arguments, and confidence recommendation. 300-500 words.",
+        expected_output="A structured debate summary with agreements, disagreements, strongest arguments, and confidence recommendation. 200-300 words.",
         agent=debate_moderator,
         context=[t1_fundamental, t8_bull_final, t9_bear_final],
     )
@@ -656,7 +657,7 @@ Do NOT add extra fields beyond the 7 specified above.""",
         agents=[bull_analyst, bear_analyst, fundamental_researcher, debate_moderator, investment_strategist],
         tasks=all_tasks,
         process=Process.sequential,
-        verbose=True,
+        verbose=False,
     )
 
     print("  🚀 Crew kickoff (11 tasks, 3 debate rounds)...")
