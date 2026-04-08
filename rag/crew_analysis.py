@@ -746,77 +746,126 @@ Do NOT add extra fields beyond the 7 specified above.""",
 # JSON PARSING HELPERS
 # ======================================================================
 
+def _find_json_object(text: str) -> str | None:
+    """
+    Extract the outermost JSON object from *text* using string-aware brace
+    matching.  Skips braces that appear inside JSON string literals so that
+    values like  "P/E < 10}"  don't break the depth counter.
+    """
+    start = text.find("{")
+    if start == -1:
+        return None
+
+    depth = 0
+    in_string = False
+    escape = False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if escape:
+            escape = False
+            continue
+        if ch == "\\":
+            escape = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start:i + 1]
+    return None
+
+
+def _try_parse_json(text: str) -> dict | None:
+    """Attempt json.loads; on failure fix common LLM quirks and retry."""
+    # Direct parse
+    try:
+        return json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        pass
+
+    # Fix trailing commas before } or ] — very common LLM mistake
+    import re as _re
+    fixed = _re.sub(r',\s*([}\]])', r'\1', text)
+    try:
+        return json.loads(fixed)
+    except (json.JSONDecodeError, ValueError):
+        pass
+
+    # Strip control characters (except newline/tab) that break json.loads
+    fixed = _re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f]', '', fixed)
+    try:
+        return json.loads(fixed)
+    except (json.JSONDecodeError, ValueError):
+        pass
+
+    return None
+
+
 def _parse_crew_json(raw: str) -> dict:
     """
-    Parse JSON from CrewAI output, handling markdown fences, preamble, and
-    markdown formatting inside string values (e.g., **bold**).
-    Falls back to extracting JSON from mixed text if needed.
+    Parse JSON from CrewAI output, handling markdown fences, preamble,
+    markdown formatting inside string values, trailing commas, and
+    braces embedded in string literals.
     """
     clean = raw.strip()
 
-    # Strip markdown code fences
+    # ── Strip markdown code fences ──────────────────────────────────
     if clean.startswith("```"):
         lines = clean.split("\n")
-        lines = lines[1:]  # Remove first line (```json or ```)
+        lines = lines[1:]  # drop opening ```json / ```
         if lines and lines[-1].strip() == "```":
             lines = lines[:-1]
         clean = "\n".join(lines).strip()
-
-    # Also strip trailing ``` if present anywhere
     if clean.endswith("```"):
         clean = clean[:clean.rfind("```")].strip()
 
-    # Try direct parse first
-    try:
-        parsed = json.loads(clean)
+    # ── 1. Direct parse ─────────────────────────────────────────────
+    parsed = _try_parse_json(clean)
+    if isinstance(parsed, dict):
         return _normalize_analysis(parsed)
-    except json.JSONDecodeError:
-        pass
 
-    # Try to find JSON object in the text (brace matching)
-    brace_start = clean.find("{")
-    if brace_start != -1:
-        # Find the matching closing brace by counting depth
-        depth = 0
-        for i in range(brace_start, len(clean)):
-            if clean[i] == "{":
-                depth += 1
-            elif clean[i] == "}":
-                depth -= 1
-                if depth == 0:
-                    json_str = clean[brace_start:i + 1]
-                    try:
-                        parsed = json.loads(json_str)
-                        return _normalize_analysis(parsed)
-                    except json.JSONDecodeError:
-                        pass
-                    break
+    # ── 2. String-aware brace extraction ────────────────────────────
+    json_str = _find_json_object(clean)
+    if json_str:
+        parsed = _try_parse_json(json_str)
+        if isinstance(parsed, dict):
+            return _normalize_analysis(parsed)
 
-    # Try stripping markdown bold (**text**) from the raw string, then parse
+    # ── 3. Strip markdown formatting, then retry ────────────────────
     import re
-    stripped = re.sub(r'\*\*([^*]+)\*\*', r'\1', clean)  # Remove **bold**
-    stripped = re.sub(r'###?\s*', '', stripped)  # Remove ### headers
-    stripped = re.sub(r'---+', '', stripped)  # Remove --- dividers
+    stripped = re.sub(r'\*\*([^*]+)\*\*', r'\1', clean)   # **bold**
+    stripped = re.sub(r'\*([^*]+)\*', r'\1', stripped)     # *italic*
+    stripped = re.sub(r'###?\s*', '', stripped)             # ### headers
+    stripped = re.sub(r'---+', '', stripped)                # --- dividers
 
-    brace_start = stripped.find("{")
-    if brace_start != -1:
-        depth = 0
-        for i in range(brace_start, len(stripped)):
-            if stripped[i] == "{":
-                depth += 1
-            elif stripped[i] == "}":
-                depth -= 1
-                if depth == 0:
-                    json_str = stripped[brace_start:i + 1]
-                    try:
-                        parsed = json.loads(json_str)
-                        return _normalize_analysis(parsed)
-                    except json.JSONDecodeError:
-                        pass
-                    break
+    parsed = _try_parse_json(stripped)
+    if isinstance(parsed, dict):
+        return _normalize_analysis(parsed)
 
-    # Fallback: return a minimal valid structure
+    json_str = _find_json_object(stripped)
+    if json_str:
+        parsed = _try_parse_json(json_str)
+        if isinstance(parsed, dict):
+            return _normalize_analysis(parsed)
+
+    # ── 4. Last-resort: scan for every '{' and try each ─────────────
+    for idx in range(len(stripped)):
+        if stripped[idx] == "{":
+            candidate = _find_json_object(stripped[idx:])
+            if candidate:
+                parsed = _try_parse_json(candidate)
+                if isinstance(parsed, dict) and "hypothesis" in parsed:
+                    return _normalize_analysis(parsed)
+
+    # ── Fallback ────────────────────────────────────────────────────
     print(f"  ⚠️ Failed to parse crew JSON, using fallback. Raw output length: {len(raw)}")
+    print(f"  ⚠️ Raw output (first 500 chars): {raw[:500]}")
     return {
         "hypothesis": "Analysis generation encountered a parsing issue. Please regenerate.",
         "confidence": 0,
