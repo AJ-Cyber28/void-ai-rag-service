@@ -68,12 +68,8 @@ app = FastAPI(
 # CORS — allow your Vercel frontend to call this
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",             # Local dev
-        "https://void-ai-nine.vercel.app",   # Your Vercel deployment
-        "https://*.vercel.app",              # Any Vercel preview
-    ],
-    allow_credentials=True,
+    allow_origins=["*"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
